@@ -1,0 +1,71 @@
+/*
+ * rs_rx.h — complete receiver: colour calibration, unmixing, decoding of one
+ * (luma) or three (RGB) channels, message assembly, message queue. The
+ * platform only has to provide per-row profiles.
+ */
+#ifndef RS_RX_H
+#define RS_RX_H
+
+#include "rs_decoder.h"
+#include "rs_assembler.h"
+#include "rs_rgb.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define RS_RX_MAX_PKTS  96
+#define RS_RX_QUEUE     16
+#define RS_RX_CAL_TTL   3.0f   /* seconds without a pilot before falling back to luma */
+
+typedef struct {
+    rs_packet_t pkt;
+    uint8_t channel;         /* 0..2, or 0 in luma mode */
+} rs_rx_packet_t;
+
+typedef struct {
+    rs_dec_cfg_t  cfg;
+    rs_asm_t      assembler;
+    rs_rgb_cal_t  cal;
+    float         last_pilot_t;
+    int           mode;      /* 0 = luma, 1 = rgb (calibrated) */
+    float         rows_per_chip;
+    uint32_t      frames, packets_total;
+    rs_dec_stats_t last_stats;   /* of the last decoded channel */
+    int           npkts;
+    rs_rx_packet_t pkts[RS_RX_MAX_PKTS];
+    rs_message_t  queue[RS_RX_QUEUE];
+    int           qhead, qlen;
+} rs_rx_t;
+
+void rs_rx_init(rs_rx_t *rx);
+
+/* Process one frame. r, g, b: per-row profiles (n samples); pass b == NULL to
+ * treat r as luma (single-channel). t: time in seconds (for pilot expiry).
+ * Returns the number of packets decoded; complete messages are queued. */
+int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);
+
+/* Pop the next complete message; returns 0 when the queue is empty. */
+int rs_rx_pop_message(rs_rx_t *rx, rs_message_t *out);
+
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Small accessors for bindings (Python ctypes, JNI). */
+size_t rs_rx_sizeof(void);
+int    rs_rx_mode(const rs_rx_t *rx);
+float  rs_rx_rows_per_chip(const rs_rx_t *rx);
+int    rs_rx_pilots(const rs_rx_t *rx);
+float  rs_rx_cal_cond(const rs_rx_t *rx);
+uint32_t rs_rx_packets(const rs_rx_t *rx);
+uint32_t rs_rx_messages(const rs_rx_t *rx);
+int    rs_rx_packet_at(const rs_rx_t *rx, int i, rs_packet_t *pkt, uint8_t *channel);
+const rs_dec_stats_t *rs_rx_stats(const rs_rx_t *rx);
+#ifdef __cplusplus
+}
+#endif
