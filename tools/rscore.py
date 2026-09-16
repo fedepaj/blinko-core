@@ -19,6 +19,8 @@ def _build():
     os.makedirs(BUILD, exist_ok=True)
     h = hashlib.sha1()
     for f in sorted(os.listdir(CORE)):
+        if not (f.endswith(".c") or f.endswith(".h")):
+            continue
         with open(os.path.join(CORE, f), "rb") as fh:
             h.update(fh.read())
     lib = os.path.join(BUILD, f"librscore-{h.hexdigest()[:10]}.dylib")
