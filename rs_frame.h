@@ -50,3 +50,29 @@ void rs_frame_profile_yuv420(const uint8_t *y, int y_rs, int y_ps,
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Bright blobs (defocused LEDs) found on a thumbnail of the frame. */
+typedef struct {
+    int r0, r1, c0, c1;       /* bounding box in full-resolution pixels: rows [r0,r1), cols [c0,c1) */
+    float cx, cy;             /* brightness-weighted centroid (pixels) */
+    int area;                 /* thumbnail pixels above threshold */
+    float peak;               /* max thumbnail luma */
+} rs_blob_t;
+
+#define RS_MAX_BLOBS 6
+
+/* Segment an interleaved RGB(A) frame into up to max_out blobs (sorted by peak brightness). */
+int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                         int r_off, int g_off, int b_off, rs_blob_t *out, int max_out);
+
+/* R, G, B profiles restricted to one blob: mean over its column window on the rows it spans,
+ * zero elsewhere (profile length = h for axis 0). */
+void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                               int r_off, int g_off, int b_off, const rs_blob_t *blob,
+                               float *r, float *g, float *b, rs_frame_info_t *info);
+#ifdef __cplusplus
+}
+#endif

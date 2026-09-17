@@ -136,3 +136,113 @@ void rs_frame_profile_yuv420(const uint8_t *y, int y_rs, int y_ps,
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
 }
+
+/* ------------------------------------------------------------ segmentation */
+#define RS_SEG_TW 256
+#define RS_SEG_TH 144
+
+int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                         int r_off, int g_off, int b_off, rs_blob_t *out, int max_out)
+{
+    static float th_img[RS_SEG_TW * RS_SEG_TH];
+    static int16_t label[RS_SEG_TW * RS_SEG_TH];
+    static int stack[RS_SEG_TW * RS_SEG_TH];
+    int ds = RS_FRAME_DS;
+    int tw = w / ds, th = h / ds;
+    if (tw > RS_SEG_TW) tw = RS_SEG_TW;
+    if (th > RS_SEG_TH) th = RS_SEG_TH;
+    float mn = 1e30f, mx = -1e30f;
+    for (int y = 0; y < th; y++) {
+        const uint8_t *row = px + (y * ds) * row_stride;
+        for (int x = 0; x < tw; x++) {
+            const uint8_t *p = row + (x * ds) * pixel_stride;
+            float v = (float)(p[r_off] + p[g_off] + p[b_off]) * (1.0f / 3.0f);
+            th_img[y * tw + x] = v;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+    }
+    if (mx - mn < 20.0f) return 0;                    /* blank frame (burst pause): nothing to segment */
+    /* the modulation stripes the blob with dark rows: sync gaps (24 rows) and the RGB
+     * pilot block (~216 rows with single dim pulses). Fill them with a vertical running
+     * maximum of +-14 thumbnail rows (+-112 px) so a source stays one component. */
+    static float filled[RS_SEG_TW * RS_SEG_TH];
+    for (int y = 0; y < th; y++) for (int x = 0; x < tw; x++) {
+        float v = 0;
+        for (int k = -14; k <= 14; k++) { int yy = y + k; if (yy < 0 || yy >= th) continue; float u = th_img[yy * tw + x]; if (u > v) v = u; }
+        filled[y * tw + x] = v;
+    }
+    for (int i = 0; i < tw * th; i++) th_img[i] = filled[i];
+    float thr = mn + 0.4f * (mx - mn);
+    for (int i = 0; i < tw * th; i++) label[i] = -1;
+    int nb = 0;
+    rs_blob_t blobs[RS_MAX_BLOBS * 2];
+    for (int y = 0; y < th; y++) for (int x = 0; x < tw; x++) {
+        int i = y * tw + x;
+        if (label[i] >= 0 || th_img[i] < thr) continue;
+        if (nb >= RS_MAX_BLOBS * 2) break;
+        /* flood fill */
+        int sp = 0; stack[sp++] = i; label[i] = (int16_t)nb;
+        int minx = x, maxx = x, miny = y, maxy = y, area = 0; float sx = 0, sy = 0, sw = 0, peak = 0;
+        while (sp) {
+            int j = stack[--sp]; int jy = j / tw, jx = j % tw;
+            float v = th_img[j] - thr;
+            area++; sx += jx * v; sy += jy * v; sw += v;
+            if (th_img[j] > peak) peak = th_img[j];
+            if (jx < minx) minx = jx; if (jx > maxx) maxx = jx; if (jy < miny) miny = jy; if (jy > maxy) maxy = jy;
+            static const int dx[4] = { 1, -1, 0, 0 }, dy[4] = { 0, 0, 1, -1 };
+            for (int k = 0; k < 4; k++) {
+                int nx = jx + dx[k], ny = jy + dy[k];
+                if (nx < 0 || ny < 0 || nx >= tw || ny >= th) continue;
+                int n = ny * tw + nx;
+                if (label[n] >= 0 || th_img[n] < thr) continue;
+                label[n] = (int16_t)nb; stack[sp++] = n;
+            }
+        }
+        if (area < 4 || area > (tw * th) / 2) { blobs[nb].area = 0; blobs[nb].peak = 0; nb++; continue; }   /* speck or whole frame: not a LED */
+        rs_blob_t b;
+        b.r0 = miny * ds; b.r1 = (maxy + 1) * ds; if (b.r1 > h) b.r1 = h;
+        b.c0 = minx * ds; b.c1 = (maxx + 1) * ds; if (b.c1 > w) b.c1 = w;
+        b.cx = (sw > 0 ? sx / sw : (float)x) * ds + ds * 0.5f;
+        b.cy = (sw > 0 ? sy / sw : (float)y) * ds + ds * 0.5f;
+        b.area = area; b.peak = peak;
+        blobs[nb++] = b;
+    }
+    /* report the brightest max_out blobs (insertion sort by peak, ignoring specks with area 0) */
+    int n = 0;
+    for (int i = 0; i < nb; i++) {
+        if (blobs[i].area < 4) continue;
+        int k = n < max_out ? n : max_out - 1;
+        if (n >= max_out && blobs[i].peak <= out[k].peak) continue;
+        if (n < max_out) n++;
+        int pos = n - 1;
+        while (pos > 0 && out[pos - 1].peak < blobs[i].peak) { out[pos] = out[pos - 1]; pos--; }
+        out[pos] = blobs[i];
+    }
+    return n;
+}
+
+void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                               int r_off, int g_off, int b_off, const rs_blob_t *blob,
+                               float *r, float *g, float *b, rs_frame_info_t *info)
+{
+    int c0 = blob->c0, c1 = blob->c1; if (c0 < 0) c0 = 0; if (c1 > w) c1 = w;
+    int len = c1 - c0; if (len < 1) len = 1;
+    float inv = 1.0f / (float)len;
+    int peak = 0, sat = 0;
+    for (int s = 0; s < h; s++) {
+        if (s < blob->r0 || s >= blob->r1) { r[s] = g[s] = b[s] = 0; continue; }
+        const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
+        uint32_t sr = 0, sg = 0, sb = 0; int mx = 0;
+        for (int c = 0; c < len; c++, p += pixel_stride) {
+            int pr = p[r_off], pg = p[g_off], pb = p[b_off];
+            sr += pr; sg += pg; sb += pb;
+            if (pr > mx) mx = pr; if (pg > mx) mx = pg; if (pb > mx) mx = pb;
+        }
+        r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
+        if (mx > peak) peak = mx;
+        if (mx >= 250) sat++;
+    }
+    info->roi_start = c0; info->roi_end = c1; info->count = h;
+    info->peak = peak; info->sat_frac = (float)sat / (float)h;
+}

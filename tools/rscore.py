@@ -4,7 +4,7 @@ import ctypes, os, subprocess, sys, hashlib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the rslog-core repo
 CORE = ROOT
 BUILD = os.path.join(ROOT, "build")
-SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c"]
+SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c", "rs_multi.c"]
 
 RS_PKT_CHIPS = 67
 RS_NUM_SLOTS = 8
@@ -266,3 +266,40 @@ class Receiver:
     def cond(self): return _lib.rs_rx_cal_cond(self.buf)
     @property
     def packets(self): return _lib.rs_rx_packets(self.buf)
+
+
+_lib.rs_multi_sizeof.restype = ctypes.c_size_t
+_lib.rs_multi_init.argtypes = [ctypes.c_void_p]
+_lib.rs_multi_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)] + [ctypes.c_int] * 7 + [ctypes.c_float]
+_lib.rs_multi_process.restype = ctypes.c_int
+_lib.rs_multi_pop_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(Message), ctypes.POINTER(ctypes.c_int)]
+_lib.rs_multi_pop_message.restype = ctypes.c_int
+_lib.rs_multi_track_count.argtypes = [ctypes.c_void_p]; _lib.rs_multi_track_count.restype = ctypes.c_int
+_lib.rs_multi_track_info.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+                                     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_int)]
+_lib.rs_multi_track_info.restype = ctypes.c_int
+
+
+class Multi:
+    """Multi-source receiver: segmentation + tracking + one receiver per light."""
+    def __init__(self):
+        self.buf = ctypes.create_string_buffer(_lib.rs_multi_sizeof())
+        _lib.rs_multi_init(self.buf)
+
+    def process(self, bgra, t=0.0):
+        import numpy as np
+        a = np.ascontiguousarray(bgra); h, w, ch = a.shape
+        n = _lib.rs_multi_process(self.buf, a.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), w, h, w * ch, ch, 2, 1, 0, t)
+        msgs = []; m = Message(); tid = ctypes.c_int()
+        while _lib.rs_multi_pop_message(self.buf, ctypes.byref(m), ctypes.byref(tid)):
+            msgs.append((tid.value, m.id, LEVELS[m.level], m.text.decode(errors="replace")))
+        return n, msgs
+
+    def tracks(self):
+        out = []
+        for i in range(_lib.rs_multi_track_count(self.buf)):
+            tid = ctypes.c_int(); cx = ctypes.c_float(); cy = ctypes.c_float(); rad = ctypes.c_float(); mode = ctypes.c_int()
+            pk = ctypes.c_uint32(); ms = ctypes.c_uint32(); pil = ctypes.c_int()
+            if _lib.rs_multi_track_info(self.buf, i, ctypes.byref(tid), ctypes.byref(cx), ctypes.byref(cy), ctypes.byref(rad), ctypes.byref(mode), ctypes.byref(pk), ctypes.byref(ms), ctypes.byref(pil)):
+                out.append(dict(id=tid.value, cx=round(cx.value), cy=round(cy.value), radius=round(rad.value), mode="rgb" if mode.value else "luma", packets=pk.value, messages=ms.value, pilots=pil.value))
+        return out
