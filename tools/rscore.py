@@ -48,7 +48,7 @@ class Tx(ctypes.Structure):
 
 class DecCfg(ctypes.Structure):
     _fields_ = [(n, ctypes.c_float) for n in
-                ("min_rows_per_chip", "max_rows_per_chip", "sync_tol", "min_contrast", "pll_gain", "min_quality", "rows_per_chip_hint")] + [("use_edges", ctypes.c_int)]
+                ("min_rows_per_chip", "max_rows_per_chip", "sync_tol", "min_contrast", "pll_gain", "min_quality", "rows_per_chip_hint")] + [("use_edges", ctypes.c_int), ("timing_retries", ctypes.c_int)]
 
 
 class Packet(ctypes.Structure):
@@ -59,7 +59,7 @@ class Packet(ctypes.Structure):
 
 class Stats(ctypes.Structure):
     _fields_ = [("syncs", ctypes.c_int), ("crc_ok", ctypes.c_int), ("crc_fail", ctypes.c_int),
-                ("start_fail", ctypes.c_int), ("truncated", ctypes.c_int),
+                ("start_fail", ctypes.c_int), ("truncated", ctypes.c_int), ("retry_ok", ctypes.c_int),
                 ("rows_per_chip", ctypes.c_float), ("contrast", ctypes.c_float)]
 
 

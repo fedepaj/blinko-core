@@ -25,6 +25,7 @@ typedef struct {
     float min_quality;        /* reject packets whose weakest bit confidence < this, default 0.05 */
     float rows_per_chip_hint; /* receiver's current estimate (0 = unknown); used by the edge path */
     int   use_edges;          /* also run the rising-edge path for saturated signals (default 1) */
+    int   timing_retries;     /* retry a failed packet with the receiver's chip clock and +-3 % (default 1) */
 } rs_dec_cfg_t;
 
 typedef struct {
@@ -43,6 +44,7 @@ typedef struct {
     int   crc_fail;
     int   start_fail;
     int   truncated;          /* sync found but packet ran past the last row */
+    int   retry_ok;           /* packets rescued by a timing hypothesis */
     float rows_per_chip;      /* mean over valid packets, 0 if none */
     float contrast;           /* global max-min of the profile */
 } rs_dec_stats_t;

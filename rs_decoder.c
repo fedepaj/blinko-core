@@ -28,6 +28,7 @@ void rs_dec_cfg_default(rs_dec_cfg_t *cfg)
     cfg->min_quality = 0.05f;
     cfg->rows_per_chip_hint = 0.0f;
     cfg->use_edges = 0;   /* experimental: measured worse than the classic path on the corpus and in simulation */
+    cfg->timing_retries = 1;
 }
 
 static float fabsf_(float x) { return x < 0 ? -x : x; }
@@ -212,7 +213,27 @@ static int decode_scale(const float *p, int n, const rs_dec_cfg_t *cfg, float rp
         float rpc_ref = (t2 - t0) / 8.0f;
         if (fabsf_((t1 - t0) / 4.0f - rpc_ref) > cfg->sync_tol * rpc_ref) continue;
         rs_packet_t pkt;
-        if (decode_bits(p, n, cfg, t0, t2, rpc_ref, smear, &pkt, st)) {
+        int ok = decode_bits(p, n, cfg, t0, t2, rpc_ref, smear, &pkt, st);
+        if (!ok && cfg->timing_retries) {
+            /* Timing hypotheses: the 8-chip sync alone fixes the chip length to ~2 %, which is
+             * 1.4 chips of drift at the end of the packet when the PLL loses the edges (saturated
+             * or noisy rows). Retry with the receiver's chip clock (a mean over many packets and
+             * frames) and with the sync estimate stretched by +-3 %. A retried packet must be
+             * decoded with higher confidence than a first-try one (CRC-8 alone would let
+             * ~1/256 of the corrupted syncs through per hypothesis). */
+            float cand[3]; int nc = 0;
+            if (cfg->rows_per_chip_hint > 0 && fabsf_(cfg->rows_per_chip_hint - rpc_ref) < 0.2f * rpc_ref &&
+                fabsf_(cfg->rows_per_chip_hint - rpc_ref) > 0.002f * rpc_ref) cand[nc++] = cfg->rows_per_chip_hint;
+            cand[nc++] = rpc_ref * 1.03f; cand[nc++] = rpc_ref * 0.97f;
+            rs_dec_stats_t scratch = *st;
+            for (int c = 0; c < nc && !ok; c++) {
+                rs_dec_stats_t tmp = scratch;
+                if (decode_bits(p, n, cfg, t0, t2, cand[c], smear, &pkt, &tmp) && pkt.quality >= 2.0f * cfg->min_quality) {
+                    ok = 1; st->retry_ok++;
+                }
+            }
+        }
+        if (ok) {
             if (nout < max_out) out[nout++] = pkt;
             /* skip runs inside this packet */
             while (i + 1 < nr && (float)s_runs[i + 1].start < pkt.row_end - 1.0f) i++;
@@ -406,7 +427,7 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                       rs_packet_t *out, int max_out, rs_dec_stats_t *st)
 {
     rs_dec_stats_t local; if (!st) st = &local;
-    st->syncs = st->crc_ok = st->crc_fail = st->start_fail = st->truncated = 0;
+    st->syncs = st->crc_ok = st->crc_fail = st->start_fail = st->truncated = 0; st->retry_ok = 0;
     st->rows_per_chip = 0; st->contrast = 0;
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
     if (n < 16 || max_out <= 0) return 0;
