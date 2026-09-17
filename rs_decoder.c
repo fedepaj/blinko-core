@@ -445,9 +445,13 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     /* multi-scale: candidate rows-per-chip, each scale accepts [0.45x, 2.2x] */
     static const float scales[] = { 3.0f, 6.0f, 12.0f, 24.0f, 44.0f };
     int nout = 0;
+    float hint = cfg->rows_per_chip_hint;
     for (unsigned s = 0; s < sizeof(scales) / sizeof(scales[0]); s++) {
         if (scales[s] * 0.45f > cfg->max_rows_per_chip) break;
         if (scales[s] * 2.2f < cfg->min_rows_per_chip) continue;
+        /* once the receiver knows its chip clock only the scale(s) covering it are searched:
+         * 1-2 passes instead of 5 (CPU on the phone) and fewer false syncs at other scales */
+        if (hint > 0 && (hint < scales[s] * 0.45f || hint > scales[s] * 2.2f)) continue;
         nout = decode_scale(p, n, cfg, scales[s], out, max_out, nout, st);
     }
     if (cfg->use_edges) nout = decode_edges(p, n, cfg, out, max_out, nout, st);

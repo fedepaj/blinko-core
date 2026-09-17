@@ -284,10 +284,11 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
     int peak = 0, sat = 0, cnt = 0;
     for (int c = 0; c < len; c++) { csum[c] = 0; csq[c] = 0; sat_col[c] = 0; }
     int rstep = (r1 - r0) > 400 ? 4 : 2;                 /* weights need ~100+ sampled rows, not all */
+    int wstep = len > 256 ? 2 : 1;                       /* and ~128+ columns: neighbours are alike */
     for (int s = r0; s < r1; s += rstep) {
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
         int mx = 0;
-        for (int c = 0; c < len; c++, p += pixel_stride) {
+        for (int c = 0; c < len; c += wstep, p += wstep * pixel_stride) {
             int pr = p[r_off], pg = p[g_off], pb = p[b_off];
             int m = pr > pg ? pr : pg; if (pb > m) m = pb;
             if (m > mx) mx = m;
@@ -309,10 +310,11 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
     int drop_clipped = drop_clipped_cols && unclipped >= RS_SAT_MIN_COLS && unclipped < len;
     float wsum = 0, wmax = 0;
     if (cnt > 1) {
-        for (int c = 0; c < len; c++) {
+        for (int c = 0; c < len; c += wstep) {
             wcol[c] = (drop_clipped && sat_col[c] >= 2) ? 0 : csq[c] / (float)(cnt - 1);
             if (wcol[c] > wmax) wmax = wcol[c];
         }
+        if (wstep > 1) for (int c = 0; c < len; c++) if (c % wstep) wcol[c] = 0;   /* unsampled columns unused */
     }
     int kept = 0;
     for (int c = 0; c < len; c++) {
@@ -324,7 +326,7 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
      * (the profile is an average: half the columns cost a little noise, not information) */
     static int   use_col[RS_SEG_TW * RS_FRAME_DS + 64];
     static float use_w[RS_SEG_TW * RS_FRAME_DS + 64];
-    int cstep = kept > 96 ? 2 : 1, nu = 0; wsum = 0;
+    int cstep = kept > 128 ? (kept + 127) / 128 : 1, nu = 0; wsum = 0;   /* ~128 columns in the mean */
     for (int c = 0, k = 0; c < len; c++) {
         if (wcol[c] == 0) continue;
         if ((k++ % cstep) == 0) { use_col[nu] = c * pixel_stride; use_w[nu] = wcol[c]; wsum += wcol[c]; nu++; }
