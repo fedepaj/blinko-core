@@ -24,6 +24,7 @@ typedef struct {
     int      seen_frames;
     rs_rx_t  rx;
     int      packets_frame;    /* packets decoded in the last frame */
+    int      drop_clipped;     /* profile variant in use: 1 = clipped columns dropped, 0 = matched weights only */
 } rs_track_t;
 
 typedef struct {

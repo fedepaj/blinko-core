@@ -18,6 +18,7 @@ typedef struct {
     int count;                /* samples written to out */
     int peak;                 /* brightest pixel value inside the ROI (any channel) */
     float sat_frac;           /* fraction of scan lines with a saturated (>= 250) pixel in the ROI */
+    float kept_cols;          /* fraction of ROI columns used by the profile (1 = none clipped) */
 } rs_frame_info_t;
 
 /* axis 0: profile along rows (out[r] = mean over ROI columns of row r), count = h.
@@ -69,6 +70,11 @@ int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pi
 
 /* R, G, B profiles restricted to one blob: mean over its column window on the rows it spans,
  * zero elsewhere (profile length = h for axis 0). */
+/* Same with an explicit choice: drop_clipped_cols = 1 removes columns that clip in >= 2 rows
+ * (a saturated core whose 1-chip gaps are filled by smear), 0 keeps them with matched weights. */
+void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                                int r_off, int g_off, int b_off, const rs_blob_t *blob, int drop_clipped_cols,
+                                float *r, float *g, float *b, rs_frame_info_t *info);
 void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                                int r_off, int g_off, int b_off, const rs_blob_t *blob,
                                float *r, float *g, float *b, rs_frame_info_t *info);

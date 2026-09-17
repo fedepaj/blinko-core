@@ -12,6 +12,9 @@
 #ifndef RS_SAT_LEVEL
 #define RS_SAT_LEVEL 250      /* pixel value treated as clipped */
 #endif
+#ifndef RS_DROP_CLIPPED
+#define RS_DROP_CLIPPED 0     /* blob profile: 1 = drop clipped columns outright, 0 = only ignore their steps */
+#endif
 #ifndef RS_SAT_MIN_COLS
 #define RS_SAT_MIN_COLS 8     /* unclipped columns needed to drop the clipped ones */
 #endif
@@ -84,6 +87,7 @@ void rs_frame_profile(const uint8_t *y, int w, int h, int row_stride, int pixel_
     }
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
+    info->kept_cols = 1.0f;
 }
 
 void rs_frame_profile_rgb(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
@@ -124,6 +128,7 @@ void rs_frame_profile_rgb(const uint8_t *px, int w, int h, int row_stride, int p
     }
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
+    info->kept_cols = use_mask ? (float)kept / (float)len : 1.0f;
 }
 
 void rs_frame_profile_yuv420(const uint8_t *y, int y_rs, int y_ps,
@@ -158,6 +163,7 @@ void rs_frame_profile_yuv420(const uint8_t *y, int y_rs, int y_ps,
     }
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
+    info->kept_cols = 1.0f;
 }
 
 /* ------------------------------------------------------------ segmentation */
@@ -253,47 +259,78 @@ void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, 
                                int r_off, int g_off, int b_off, const rs_blob_t *blob,
                                float *r, float *g, float *b, rs_frame_info_t *info)
 {
+    rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, blob, RS_DROP_CLIPPED, r, g, b, info);
+}
+
+void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
+                                int r_off, int g_off, int b_off, const rs_blob_t *blob, int drop_clipped_cols,
+                                float *r, float *g, float *b, rs_frame_info_t *info)
+{
+    static float wcol[RS_SEG_TW * RS_FRAME_DS + 64];
+    static float csum[RS_SEG_TW * RS_FRAME_DS + 64], csq[RS_SEG_TW * RS_FRAME_DS + 64];
     static uint16_t sat_col[RS_SEG_TW * RS_FRAME_DS + 64];
+    int maxlen = (int)(sizeof(wcol) / sizeof(wcol[0]));
     int c0 = blob->c0, c1 = blob->c1; if (c0 < 0) c0 = 0; if (c1 > w) c1 = w;
-    int len = c1 - c0; if (len < 1) len = 1;
-    if (len > (int)(sizeof(sat_col) / sizeof(sat_col[0]))) len = (int)(sizeof(sat_col) / sizeof(sat_col[0]));
+    int len = c1 - c0; if (len < 1) len = 1; if (len > maxlen) len = maxlen;
     int r0 = blob->r0 < 0 ? 0 : blob->r0, r1 = blob->r1 > h ? h : blob->r1;
-    /* A clipped LED core loses the 1-chip gaps (exposure smear amplified by saturation) while the
-     * halo around it keeps them. Find the columns that clip in at least two rows and, when enough
-     * columns are left, average only the others. The column set is fixed for the whole frame so
-     * every row is measured by the same estimator. */
-    int peak = 0, sat = 0;
-    for (int c = 0; c < len; c++) sat_col[c] = 0;
-    for (int s = r0; s < r1; s++) {
+    /* Matched column weights: each column is weighted by the variance of its luma along the
+     * rows of the box. Stripes (the signal) are what varies along rows, so columns carrying
+     * the modulation dominate; a clipped core (flat at 255), the dark surround and noise-only
+     * columns get little weight. This replaces both the clipped-column exclusion and any
+     * guess about how far the halo extends. */
+    /* The weight is the mean squared row-to-row difference (a high-pass), not the raw variance:
+     * a burst envelope or a pulsed fault LED makes every column vary a lot at low frequency,
+     * and the clipped core would win; only the stripes vary from row to row. */
+    int peak = 0, sat = 0, cnt = 0;
+    for (int c = 0; c < len; c++) { csum[c] = 0; csq[c] = 0; sat_col[c] = 0; }
+    for (int s = r0; s < r1; s += 2) {
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
         int mx = 0;
         for (int c = 0; c < len; c++, p += pixel_stride) {
             int pr = p[r_off], pg = p[g_off], pb = p[b_off];
             int m = pr > pg ? pr : pg; if (pb > m) m = pb;
-            if (m >= RS_SAT_LEVEL) sat_col[c]++;
             if (m > mx) mx = m;
+            int clipped = m >= RS_SAT_LEVEL;
+            if (clipped) sat_col[c]++;
+            float y = (float)(pr + pg + pb);
+            /* a step into or out of clipping is not a stripe: skip diffs touching a clipped sample */
+            if (cnt && !clipped && csum[c] >= 0) { float d = y - csum[c]; csq[c] += d * d; }
+            csum[c] = clipped ? -1.0f : y;                  /* previous sampled row, -1 = clipped */
         }
         if (mx > peak) peak = mx;
         if (mx >= 250) sat++;
+        cnt++;
+    }
+    /* a clipped column (a burst or fault-pulse edge gives it one huge step) is dropped outright
+     * when enough unclipped columns remain, as in rs_frame_profile_rgb */
+    int unclipped = 0;
+    for (int c = 0; c < len; c++) if (sat_col[c] < 2) unclipped++;
+    int drop_clipped = drop_clipped_cols && unclipped >= RS_SAT_MIN_COLS && unclipped < len;
+    float wsum = 0, wmax = 0;
+    if (cnt > 1) {
+        for (int c = 0; c < len; c++) {
+            wcol[c] = (drop_clipped && sat_col[c] >= 2) ? 0 : csq[c] / (float)(cnt - 1);
+            if (wcol[c] > wmax) wmax = wcol[c];
+        }
     }
     int kept = 0;
-    for (int c = 0; c < len; c++) if (sat_col[c] < 2) kept++;
-    int use_mask = kept >= RS_SAT_MIN_COLS && kept < len;
-    float inv = 1.0f / (float)(use_mask ? kept : len);
+    for (int c = 0; c < len; c++) {
+        if (wmax > 0 && wcol[c] < 0.05f * wmax) wcol[c] = 0;   /* noise-only columns */
+        if (wcol[c] > 0) { wsum += wcol[c]; kept++; }
+    }
+    if (wsum <= 0) { for (int c = 0; c < len; c++) wcol[c] = 1; wsum = (float)len; kept = len; }
+    float inv = 1.0f / wsum;
     for (int s = 0; s < h; s++) {
         if (s < r0 || s >= r1) { r[s] = g[s] = b[s] = 0; continue; }
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
-        uint32_t sr = 0, sg = 0, sb = 0;
-        if (use_mask) {
-            for (int c = 0; c < len; c++, p += pixel_stride) {
-                if (sat_col[c] >= 2) continue;
-                sr += p[r_off]; sg += p[g_off]; sb += p[b_off];
-            }
-        } else {
-            for (int c = 0; c < len; c++, p += pixel_stride) { sr += p[r_off]; sg += p[g_off]; sb += p[b_off]; }
+        float sr = 0, sg = 0, sb = 0;
+        for (int c = 0; c < len; c++, p += pixel_stride) {
+            float wc = wcol[c]; if (wc == 0) continue;
+            sr += wc * p[r_off]; sg += wc * p[g_off]; sb += wc * p[b_off];
         }
         r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
     }
     info->roi_start = c0; info->roi_end = c1; info->count = h;
-    info->peak = peak; info->sat_frac = (float)sat / (float)h;
+    info->peak = peak; info->sat_frac = cnt ? (float)sat / (float)cnt : 0;
+    info->kept_cols = (float)kept / (float)len;
 }

@@ -43,6 +43,8 @@ void rs_rx_init(rs_rx_t *rx);
 /* Process one frame. r, g, b: per-row profiles (n samples); pass b == NULL to
  * treat r as luma (single-channel). t: time in seconds (for pilot expiry).
  * Returns the number of packets decoded; complete messages are queued. */
+/* 1 when all three camera channels are modulated (an RGB LED), 0 for a single-colour light. */
+int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);
 
 /* Pop the next complete message; returns 0 when the queue is empty. */

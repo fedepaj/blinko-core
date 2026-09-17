@@ -36,6 +36,19 @@ static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
     }
 }
 
+int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n)
+{
+    const float *ch[3] = { r, g, b }; float rng[3], maxrng = 0;
+    for (int c = 0; c < 3; c++) {
+        float a = 1e30f, z = -1e30f;
+        for (int i = 0; i < n; i++) { float v = ch[c][i]; if (v < a) a = v; if (v > z) z = v; }
+        rng[c] = z - a; if (rng[c] > maxrng) maxrng = rng[c];
+    }
+    if (maxrng < 30.0f) return 0;
+    for (int c = 0; c < 3; c++) if (rng[c] < 0.3f * maxrng) return 0;
+    return 1;
+}
+
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t)
 {
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
@@ -49,17 +62,7 @@ int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, i
     /* Is the light genuinely three-coloured (all camera channels modulated)? A 3-die RGB LED
      * seen defocused is three colour discs offset by ~40 % of their diameter, so no pilot lock
      * may ever happen; in that case the camera channels are decoded directly. */
-    int three = 0;
-    {
-        const float *ch[3] = { r, g, b }; float rng[3], maxrng = 0;
-        for (int c = 0; c < 3; c++) {
-            float a = 1e30f, z = -1e30f;
-            for (int i = 0; i < n; i++) { float v = ch[c][i]; if (v < a) a = v; if (v > z) z = v; }
-            rng[c] = z - a; if (rng[c] > maxrng) maxrng = rng[c];
-        }
-        three = maxrng >= 30.0f;
-        for (int c = 0; c < 3 && three; c++) if (rng[c] < 0.3f * maxrng) three = 0;
-    }
+    int three = rs_rx_three_coloured(r, g, b, n);
     if (rs_rgb_pilot_detect(&rx->cal, r, g, b, n)) rx->last_pilot_t = t;
     int rgb = rx->cal.valid && (t - rx->last_pilot_t) < RS_RX_CAL_TTL;
 #ifdef RS_RX_DIRECT_ALWAYS
