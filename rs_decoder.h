@@ -56,6 +56,10 @@ void rs_dec_cfg_default(rs_dec_cfg_t *cfg);
 int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                       rs_packet_t *out, int max_out, rs_dec_stats_t *st);
 
+/* Decode a packet at a known position (row of its gap chip, chip length in rows): no sync
+ * search. Returns 1 and fills out when the start bit and CRC pass. */
+int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
+
 /* Debug: binarized profile of the last scale that produced a packet
  * (or the last scale tried). Values 0/1, or 2 for low-contrast rows. */
 const uint8_t *rs_decode_debug_binary(int *n);

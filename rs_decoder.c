@@ -479,3 +479,18 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
 }
 
 const uint8_t *rs_decode_debug_binary(int *n) { if (n) *n = s_dbg_n; return s_dbg; }
+
+/* Decode one packet at a known position (temporal prediction / experiments): row_start is the
+ * gap chip before the sync, rpc the chip length in rows. No sync search, only the bit decisions
+ * with the PLL, the start bit and the CRC. */
+int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
+{
+    rs_dec_stats_t st = { 0 };
+    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
+    if (n < 16 || rpc <= 0) return 0;
+    s_cum[0] = 0;
+    for (int r = 0; r < n; r++) s_cum[r + 1] = s_cum[r] + p[r];
+    float t0 = row_start + rpc, t2 = row_start + 9.0f * rpc;
+    if (t0 < 0 || t2 + 2 * RS_PKT_BITS * rpc > (float)n) return 0;
+    return decode_bits(p, n, cfg, t0, t2, rpc, 0.0f, out, &st);
+}
