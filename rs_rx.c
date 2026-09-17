@@ -26,6 +26,7 @@ static void push_msg(rs_rx_t *rx, const rs_message_t *m)
  * can still be decoded at its predicted position: the bits survive longer than the sync. */
 static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int k, int max_out)
 {
+    /* called right after rs_decode_profile on the same profile: its cumulative sums are reused */
     if (!rx->cfg.grid_decode || k == 0) return k;
     int n0 = k;
     float period = 0;
@@ -34,16 +35,16 @@ static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int
     float rpc = period / (float)RS_PKT_CHIPS;
     for (int i = 0; i < n0 && k < max_out; i++) {
         for (int dir = -1; dir <= 1; dir += 2) {
-            for (int m = 1; m < 8 && k < max_out; m++) {
+            for (int m = 1; m <= 4 && k < max_out; m++) {
                 float pos = out[i].row_start + (float)dir * (float)m * period;
                 if (pos < 0 || pos + period > (float)n) break;
                 int taken = 0;
                 for (int j = 0; j < k; j++) if (out[j].row_start > pos - 2 * rpc && out[j].row_start < pos + 2 * rpc) { taken = 1; break; }
                 if (taken) continue;
-                static const float d[5] = { 0.0f, -0.25f, 0.25f, -0.5f, 0.5f };
+                static const float d[3] = { 0.0f, -0.3f, 0.3f };
                 rs_packet_t pk; int ok = 0;
-                for (int q = 0; q < 5 && !ok; q++)
-                    ok = rs_decode_at(p, n, &rx->cfg, pos + d[q] * rpc, rpc, &pk) && pk.quality >= 2.0f * rx->cfg.min_quality;
+                for (int q = 0; q < 3 && !ok; q++)
+                    ok = rs_decode_at_prepared(p, n, &rx->cfg, pos + d[q] * rpc, rpc, &pk) && pk.quality >= 2.0f * rx->cfg.min_quality;
                 if (!ok) break;              /* the grid is broken here (pilot, pause, edge): stop this direction */
                 out[k++] = pk; rx->grid_ok++;
             }

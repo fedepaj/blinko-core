@@ -60,6 +60,9 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
 /* Decode a packet at a known position (row of its gap chip, chip length in rows): no sync
  * search. Returns 1 and fills out when the start bit and CRC pass. */
 int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
+/* Same, reusing the cumulative sums of the last rs_decode_profile / rs_decode_at call on this
+ * very profile (valid right after them; do not use after decoding another profile). */
+int rs_decode_at_prepared(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
 
 /* Debug: binarized profile of the last scale that produced a packet
  * (or the last scale tried). Values 0/1, or 2 for low-contrast rows. */

@@ -18,6 +18,10 @@ static int     s_deque[RS_DEC_MAX_ROWS];
 typedef struct { uint8_t level; int start; int len; } rs_run_t;
 static rs_run_t s_runs[RS_DEC_MAX_ROWS + 1];
 
+#ifndef RS_GRID_DEFAULT
+#define RS_GRID_DEFAULT 1
+#endif
+
 void rs_dec_cfg_default(rs_dec_cfg_t *cfg)
 {
     cfg->min_rows_per_chip = 2.5f;
@@ -29,7 +33,7 @@ void rs_dec_cfg_default(rs_dec_cfg_t *cfg)
     cfg->rows_per_chip_hint = 0.0f;
     cfg->use_edges = 0;   /* experimental: measured worse than the classic path on the corpus and in simulation */
     cfg->timing_retries = 1;
-    cfg->grid_decode = 1;
+    cfg->grid_decode = RS_GRID_DEFAULT;
 }
 
 static float fabsf_(float x) { return x < 0 ? -x : x; }
@@ -486,11 +490,18 @@ const uint8_t *rs_decode_debug_binary(int *n) { if (n) *n = s_dbg_n; return s_db
  * with the PLL, the start bit and the CRC. */
 int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
 {
-    rs_dec_stats_t st = { 0 };
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
     if (n < 16 || rpc <= 0) return 0;
     s_cum[0] = 0;
     for (int r = 0; r < n; r++) s_cum[r + 1] = s_cum[r] + p[r];
+    return rs_decode_at_prepared(p, n, cfg, row_start, rpc, out);
+}
+
+int rs_decode_at_prepared(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
+{
+    rs_dec_stats_t st = { 0 };
+    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
+    if (n < 16 || rpc <= 0) return 0;
     float t0 = row_start + rpc, t2 = row_start + 9.0f * rpc;
     if (t0 < 0 || t2 + 2 * RS_PKT_BITS * rpc > (float)n) return 0;
     return decode_bits(p, n, cfg, t0, t2, rpc, 0.0f, out, &st);
