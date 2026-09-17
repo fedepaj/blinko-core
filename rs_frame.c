@@ -283,7 +283,8 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
      * and the clipped core would win; only the stripes vary from row to row. */
     int peak = 0, sat = 0, cnt = 0;
     for (int c = 0; c < len; c++) { csum[c] = 0; csq[c] = 0; sat_col[c] = 0; }
-    for (int s = r0; s < r1; s += 2) {
+    int rstep = (r1 - r0) > 400 ? 4 : 2;                 /* weights need ~100+ sampled rows, not all */
+    for (int s = r0; s < r1; s += rstep) {
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
         int mx = 0;
         for (int c = 0; c < len; c++, p += pixel_stride) {
@@ -319,14 +320,23 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
         if (wcol[c] > 0) { wsum += wcol[c]; kept++; }
     }
     if (wsum <= 0) { for (int c = 0; c < len; c++) wcol[c] = 1; wsum = (float)len; kept = len; }
+    /* the weighted mean visits only the weighted columns, every other one when there are many
+     * (the profile is an average: half the columns cost a little noise, not information) */
+    static int   use_col[RS_SEG_TW * RS_FRAME_DS + 64];
+    static float use_w[RS_SEG_TW * RS_FRAME_DS + 64];
+    int cstep = kept > 96 ? 2 : 1, nu = 0; wsum = 0;
+    for (int c = 0, k = 0; c < len; c++) {
+        if (wcol[c] == 0) continue;
+        if ((k++ % cstep) == 0) { use_col[nu] = c * pixel_stride; use_w[nu] = wcol[c]; wsum += wcol[c]; nu++; }
+    }
     float inv = 1.0f / wsum;
     for (int s = 0; s < h; s++) {
         if (s < r0 || s >= r1) { r[s] = g[s] = b[s] = 0; continue; }
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
         float sr = 0, sg = 0, sb = 0;
-        for (int c = 0; c < len; c++, p += pixel_stride) {
-            float wc = wcol[c]; if (wc == 0) continue;
-            sr += wc * p[r_off]; sg += wc * p[g_off]; sb += wc * p[b_off];
+        for (int k = 0; k < nu; k++) {
+            const uint8_t *q = p + use_col[k]; float wc = use_w[k];
+            sr += wc * q[r_off]; sg += wc * q[g_off]; sb += wc * q[b_off];
         }
         r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
     }

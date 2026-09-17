@@ -24,6 +24,9 @@ static int overlap(const rs_track_t *tr, const rs_blob_t *b)
 #ifndef RS_TRACK_ROW_EXT
 #define RS_TRACK_ROW_EXT 1.0f     /* halo rows added above and below, in blob heights */
 #endif
+#ifndef RS_TRACK_CONFIRM_FRAMES
+#define RS_TRACK_CONFIRM_FRAMES 12 /* frames before a track that never decoded is reported */
+#endif
 #ifndef RS_TRACK_REEVAL
 #define RS_TRACK_REEVAL 8         /* frames between profile-variant comparisons */
 #endif
@@ -167,17 +170,23 @@ int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id)
 
 size_t rs_multi_sizeof(void) { return sizeof(rs_multi_t); }
 
+/* Reported tracks are the confirmed ones: a light that decoded something, or one seen for a
+ * while (a reflection or a speck at the frame edge lives a few frames and never decodes). */
+static int confirmed(const rs_track_t *tr)
+{
+    return tr->active && (tr->rx.packets_total > 0 || tr->seen_frames >= RS_TRACK_CONFIRM_FRAMES);
+}
 int rs_multi_track_count(const rs_multi_t *m)
 {
     int n = 0;
-    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) n++;
+    for (int k = 0; k < RS_MAX_TRACKS; k++) if (confirmed(&m->tracks[k])) n++;
     return n;
 }
 
 const rs_track_t *rs_multi_track(const rs_multi_t *m, int i)
 {
     for (int k = 0; k < RS_MAX_TRACKS; k++) {
-        if (!m->tracks[k].active) continue;
+        if (!confirmed(&m->tracks[k])) continue;
         if (i-- == 0) return &m->tracks[k];
     }
     return NULL;
