@@ -281,6 +281,12 @@ const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i)
     const rs_track_t *tr = rs_multi_track(m, i);
     return tr ? &tr->rx : NULL;
 }
+float rs_multi_link_score(const rs_multi_t *m, int i, int j)
+{
+    const rs_track_t *a = rs_multi_track(m, i), *b = rs_multi_track(m, j);
+    if (!a || !b) return 0;
+    return m->link[(int)(a - m->tracks)][(int)(b - m->tracks)];
+}
 int rs_multi_track_group(const rs_multi_t *m, int i)
 {
     const rs_track_t *tr = rs_multi_track(m, i);

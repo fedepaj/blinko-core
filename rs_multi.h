@@ -53,6 +53,8 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
 /* Logical source of the i-th reported track: its own id, or the id of the track it is linked
  * to because both lights transmit the same packets (two LEDs of one board). */
 int rs_multi_track_group(const rs_multi_t *m, int i);
+/* Same-board evidence between the i-th and j-th reported tracks (diagnostics). */
+float rs_multi_link_score(const rs_multi_t *m, int i, int j);
 
 /* Pop the next message from any track; *track_id receives the logical source (group id). */
 int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id);
