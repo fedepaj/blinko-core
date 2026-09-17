@@ -46,12 +46,34 @@ int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, i
         decode_channel(rx, r, n, 0);
         return rx->npkts;
     }
+    /* Is the light genuinely three-coloured (all camera channels modulated)? A 3-die RGB LED
+     * seen defocused is three colour discs offset by ~40 % of their diameter, so no pilot lock
+     * may ever happen; in that case the camera channels are decoded directly. */
+    int three = 0;
+    {
+        const float *ch[3] = { r, g, b }; float rng[3], maxrng = 0;
+        for (int c = 0; c < 3; c++) {
+            float a = 1e30f, z = -1e30f;
+            for (int i = 0; i < n; i++) { float v = ch[c][i]; if (v < a) a = v; if (v > z) z = v; }
+            rng[c] = z - a; if (rng[c] > maxrng) maxrng = rng[c];
+        }
+        three = maxrng >= 30.0f;
+        for (int c = 0; c < 3 && three; c++) if (rng[c] < 0.3f * maxrng) three = 0;
+    }
     if (rs_rgb_pilot_detect(&rx->cal, r, g, b, n)) rx->last_pilot_t = t;
     int rgb = rx->cal.valid && (t - rx->last_pilot_t) < RS_RX_CAL_TTL;
+#ifdef RS_RX_DIRECT_ALWAYS
+    if (three) rgb = 0;
+#endif
     rx->mode = rgb ? 1 : 0;
     if (rgb) {
         rs_rgb_unmix(&rx->cal, r, g, b, n, s_ch[0], s_ch[1], s_ch[2]);
         for (int c = 0; c < 3; c++) decode_channel(rx, s_ch[c], n, (uint8_t)c);
+    } else if (three) {
+        /* three-coloured light but no pilot lock yet: decode the camera channels directly
+         * (crosstalk is moderate for LED primaries; the CRC rejects what it corrupts) */
+        rx->mode = 2;
+        decode_channel(rx, r, n, 0); decode_channel(rx, g, n, 1); decode_channel(rx, b, n, 2);
     } else {
         for (int i = 0; i < n; i++) s_luma[i] = (r[i] + g[i] + b[i]) * (1.0f / 3.0f);
         decode_channel(rx, s_luma, n, 0);

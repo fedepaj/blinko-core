@@ -37,7 +37,7 @@ def replay(path, axis="rows", quiet=False, rx=None, multi=False):
     rec = Recording(path)
     rx = rx or (Multi() if multi else Receiver())
     frames = len(rec); t0 = rec.frames[0][1] if frames else 0
-    packets = 0; messages = []; per_frame = []; modes = []; conds = []; peaks = []; sats = []; ntracks = []; track_ids = set()
+    packets = 0; messages = []; per_frame = []; modes = []; conds = []; peaks = []; sats = []; ntracks = []; track_ids = set(); direct = 0
     for k in range(frames):
         ts, gyro, accel, a = rec.frame(k)
         if multi:
@@ -48,7 +48,8 @@ def replay(path, axis="rows", quiet=False, rx=None, multi=False):
         else:
             r, g, b, info = profiles_bgra(a, axis)
             n, msgs = rx.process(r, g, b, ts)
-            modes.append(rx.mode); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
+            direct += rx.mode == 2
+            modes.append(1 if rx.mode else 0); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
         packets += n; per_frame.append(n)
         for m in msgs:
             messages.append((round(ts - t0, 3), m[0], m[1], m[2]))
@@ -58,7 +59,7 @@ def replay(path, axis="rows", quiet=False, rx=None, multi=False):
         "file": path.split('/')[-1], "note": rec.header.get("note", ""), "frames": frames, "duration_s": round(dur, 3),
         "fps": round((frames - 1) / dur, 1) if frames > 1 else 0, "packets": packets, "pkt_per_s": round(packets / dur, 1),
         "frames_with_packets": int(sum(1 for n in per_frame if n)), "messages": len(messages),
-        "rgb_frames": int(sum(modes)), "pilots": (sum(t["pilots"] for t in rx.tracks()) if multi else rx.pilots),
+        "rgb_frames": int(sum(modes)), "direct_frames": direct, "pilots": (sum(t["pilots"] for t in rx.tracks()) if multi else rx.pilots),
         "cond_mean": round(float(np.mean(conds)), 2) if conds else 0,
         "resets": 0 if multi else int(_lib.rs_rx_resets(rx.buf)), "peak_max": int(max(peaks) if peaks else 0),
         "tracks_mean": round(float(np.mean(ntracks)), 2) if ntracks else 0, "tracks_max": int(max(ntracks) if ntracks else 0),
@@ -86,7 +87,7 @@ def main():
         s = replay(f, a.axis, a.quiet, multi=a.multi)
         results.append(s)
         print(f"   note={s['note']!r} frames={s['frames']} fps={s['fps']} pkt/s={s['pkt_per_s']} frames_with_pkts={s['frames_with_packets']} "
-              f"msgs={s['messages']} rgb_frames={s['rgb_frames']} pilots={s['pilots']} cond={s['cond_mean']} resets={s['resets']} peak={s['peak_max']} sat={s['sat_mean']}"
+              f"msgs={s['messages']} rgb_frames={s['rgb_frames']} direct={s.get('direct_frames',0)} pilots={s['pilots']} cond={s['cond_mean']} resets={s['resets']} peak={s['peak_max']} sat={s['sat_mean']}"
               + (f" tracks={s['tracks_mean']}/{s['tracks_max']} ids={s['track_ids']}" if a.multi else ""))
     if a.json:
         json.dump(results, open(a.json, 'w'), indent=1); print("wrote", a.json)
