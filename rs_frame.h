@@ -28,7 +28,6 @@ void rs_frame_profile(const uint8_t *y, int w, int h, int row_stride, int pixel_
 #ifdef __cplusplus
 }
 #endif
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,3 +75,4 @@ void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, 
 #ifdef __cplusplus
 }
 #endif
+#endif /* RS_FRAME_H */
