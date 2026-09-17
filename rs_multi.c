@@ -119,6 +119,98 @@ static void track_feed(rs_multi_t *m, rs_track_t *tr, const uint8_t *px, int w, 
     tr->last_packets = tr->packets_frame;
 }
 
+/* Two lights of one board (the RGB LED and the builtin LED mirroring a channel) show packets
+ * of one carousel: the sequence number q of a packet is nchan * (its time in packets) + channel,
+ * and within a slot the seed grows by 1 per carousel packet, minus 3 per control triplet. So for
+ * two packets of the same slot seen in one frame by tracks A and B, same board means
+ *   seed_b - seed_a  in  { n*dp + dch (+/- 3, +/- 6) }  for n in {1, 3},  dp = row distance in packets.
+ * Rows are time, so this holds whether the two blobs overlap or sit far apart in the frame.
+ * Matches add to a decayed pair score, mismatches subtract; above RS_LINK_ON the tracks share a
+ * group (id = the smallest track id), below RS_LINK_OFF they part again. A random pair of
+ * boards matches ~6 % of the time, so its score drifts negative. */
+#ifndef RS_LINK_ON
+#define RS_LINK_ON  2.0f
+#endif
+#ifndef RS_LINK_OFF
+#define RS_LINK_OFF 0.5f
+#endif
+static int seed_relation_ok(int dseed, int dq)
+{
+    static const int shift[5] = { 0, -3, 3, -6, 6 };
+    for (int k = 0; k < 5; k++) { int d = dseed - (dq + shift[k]); if (d < 0) d = -d; if (d <= 1) return 1; }
+    return 0;
+}
+/* Packet index distance between two packets (rows within a frame plus the time between frames,
+ * with the protocol's default chip length: the test only needs +-1 packet). */
+#ifndef RS_LINK_CHIP_S
+#define RS_LINK_CHIP_S 30e-6f
+#endif
+static float packet_distance(float ta, float rowa, float tb, float rowb, float rpc)
+{
+    return (rowb - rowa) / (rpc * (float)RS_PKT_CHIPS) + (tb - ta) / (RS_LINK_CHIP_S * (float)RS_PKT_CHIPS);
+}
+static float pair_evidence(const rs_track_t *ta, const rs_rx_packet_t *pa, float t, const rs_track_t *tb, int skip_same_frame)
+{
+    float e = 0;
+    if (pa->pkt.seed >= RS_SEED_MSGCRC2) return 0;
+    for (int j = 0; j < tb->nrecent; j++) {
+        const __typeof__(tb->recent[0]) *rb = &tb->recent[j];
+        if (rb->id != pa->pkt.id || rb->seed >= RS_SEED_MSGCRC2) continue;
+        if (skip_same_frame && rb->t == t) continue;
+        if (t - rb->t > 0.02f || rb->t - t > 0.02f) continue;         /* within ~2 frames: at most one pilot block (0.5 packet) in between */
+        float rpc = 0.5f * (pa->pkt.rows_per_chip + rb->rpc);
+        float dp_f = packet_distance(t, pa->pkt.row_start, rb->t, rb->row, rpc);
+        int dp = (int)(dp_f + (dp_f >= 0 ? 0.5f : -0.5f));
+        int dseed = (int)rb->seed - (int)pa->pkt.seed, dch = (int)rb->ch - (int)pa->channel;
+        int ok = seed_relation_ok(dseed, dp + dch) || seed_relation_ok(dseed, 3 * dp + dch);
+        e += ok ? 1.0f : -0.3f;
+    }
+    (void)ta;
+    return e;
+}
+static void remember_packets(rs_track_t *tr, float t)
+{
+    for (int i = 0; i < tr->rx.npkts; i++) {
+        __typeof__(tr->recent[0]) *r = &tr->recent[tr->recent_head];
+        r->t = t; r->row = tr->rx.pkts[i].pkt.row_start; r->rpc = tr->rx.pkts[i].pkt.rows_per_chip;
+        r->seed = tr->rx.pkts[i].pkt.seed; r->id = tr->rx.pkts[i].pkt.id; r->ch = tr->rx.pkts[i].channel;
+        tr->recent_head = (tr->recent_head + 1) % RS_TRACK_RECENT;
+        if (tr->nrecent < RS_TRACK_RECENT) tr->nrecent++;
+    }
+}
+static void link_tracks(rs_multi_t *m, float t)
+{
+    /* every track remembers this frame's packets first; then, per pair, A-new vs B-all (same
+     * frame included) and B-new vs A-past, so each packet pair is counted once */
+    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) remember_packets(&m->tracks[k], t);
+    for (int a = 0; a < RS_MAX_TRACKS; a++) {
+        rs_track_t *ta = &m->tracks[a];
+        if (!ta->active) continue;
+        for (int b = a + 1; b < RS_MAX_TRACKS; b++) {
+            rs_track_t *tb = &m->tracks[b];
+            if (!tb->active) continue;
+            float evidence = 0;
+            for (int i = 0; i < ta->rx.npkts; i++) evidence += pair_evidence(ta, &ta->rx.pkts[i], t, tb, 0);
+            for (int i = 0; i < tb->rx.npkts; i++) evidence += pair_evidence(tb, &tb->rx.pkts[i], t, ta, 1);
+            float s = m->link[a][b] * 0.995f + evidence;
+            if (s > 12.0f) s = 12.0f; if (s < -4.0f) s = -4.0f;
+            m->link[a][b] = m->link[b][a] = s;
+        }
+    }
+    /* groups: start from own id, then pull every linked pair to the smaller id */
+    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) m->tracks[k].group = m->tracks[k].id;
+    for (int pass = 0; pass < RS_MAX_TRACKS; pass++) {
+        for (int a = 0; a < RS_MAX_TRACKS; a++) for (int b = a + 1; b < RS_MAX_TRACKS; b++) {
+            if (!m->tracks[a].active || !m->tracks[b].active) continue;
+            int linked = m->link[a][b] >= RS_LINK_ON || (m->link[a][b] >= RS_LINK_OFF && m->linked[a][b]);
+            if (pass == 0) m->linked[a][b] = (unsigned char)linked;
+            if (!linked) continue;
+            int g = m->tracks[a].group < m->tracks[b].group ? m->tracks[a].group : m->tracks[b].group;
+            m->tracks[a].group = g; m->tracks[b].group = g;
+        }
+    }
+}
+
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                      int r_off, int g_off, int b_off, float t)
 {
@@ -153,11 +245,14 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         for (int j = 0; j < RS_MAX_TRACKS; j++) if (!m->tracks[j].active) { k = j; break; }
         if (k < 0) break;
         rs_track_t *tr = &m->tracks[k];
-        tr->active = 1; tr->id = m->next_id++; tr->seen_frames = 0;
+        tr->active = 1; tr->id = m->next_id++; tr->seen_frames = 0; tr->group = tr->id;
+        tr->drop_clipped = 0; tr->last_packets = 0; tr->frames_since_eval = 0; tr->nrecent = 0; tr->recent_head = 0;
+        for (int j = 0; j < RS_MAX_TRACKS; j++) { m->link[k][j] = m->link[j][k] = 0; m->linked[k][j] = m->linked[j][k] = 0; }
         rs_rx_init(&tr->rx);
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;
     }
+    link_tracks(m, t);
     int total = 0;
     for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) total += m->tracks[k].packets_frame;
     return total;
@@ -168,7 +263,7 @@ int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id)
     for (int k = 0; k < RS_MAX_TRACKS; k++) {
         rs_track_t *tr = &m->tracks[k];
         if (!tr->active) continue;
-        if (rs_rx_pop_message(&tr->rx, out)) { if (track_id) *track_id = tr->id; return 1; }
+        if (rs_rx_pop_message(&tr->rx, out)) { if (track_id) *track_id = tr->group; return 1; }
     }
     return 0;
 }
@@ -185,6 +280,11 @@ const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i)
 {
     const rs_track_t *tr = rs_multi_track(m, i);
     return tr ? &tr->rx : NULL;
+}
+int rs_multi_track_group(const rs_multi_t *m, int i)
+{
+    const rs_track_t *tr = rs_multi_track(m, i);
+    return tr ? tr->group : 0;
 }
 int rs_multi_track_count(const rs_multi_t *m)
 {

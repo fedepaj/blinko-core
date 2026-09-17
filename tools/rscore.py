@@ -304,5 +304,5 @@ class Multi:
             tid = ctypes.c_int(); cx = ctypes.c_float(); cy = ctypes.c_float(); rad = ctypes.c_float(); mode = ctypes.c_int()
             pk = ctypes.c_uint32(); ms = ctypes.c_uint32(); pil = ctypes.c_int()
             if _lib.rs_multi_track_info(self.buf, i, ctypes.byref(tid), ctypes.byref(cx), ctypes.byref(cy), ctypes.byref(rad), ctypes.byref(mode), ctypes.byref(pk), ctypes.byref(ms), ctypes.byref(pil)):
-                out.append(dict(id=tid.value, cx=round(cx.value), cy=round(cy.value), radius=round(rad.value), mode="rgb" if mode.value else "luma", packets=pk.value, messages=ms.value, pilots=pil.value))
+                out.append(dict(id=tid.value, group=_lib.rs_multi_track_group(self.buf, i), cx=round(cx.value), cy=round(cy.value), radius=round(rad.value), mode="rgb" if mode.value else "luma", packets=pk.value, messages=ms.value, pilots=pil.value))
         return out

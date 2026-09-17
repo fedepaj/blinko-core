@@ -15,6 +15,8 @@ extern "C" {
 #define RS_MAX_TRACKS 4
 #define RS_TRACK_TTL  1.0f     /* seconds without a detection before a track is dropped */
 
+#define RS_TRACK_RECENT 24
+
 typedef struct {
     int      active;
     int      id;               /* stable identifier (1, 2, ...) */
@@ -27,10 +29,16 @@ typedef struct {
     int      drop_clipped;     /* profile variant in use: 1 = clipped columns dropped, 0 = matched weights only */
     int      last_packets;     /* packets from the previous frame (0 triggers a variant re-evaluation) */
     int      frames_since_eval;
+    int      group;            /* logical source: the smallest track id among the lights sending the same packets */
+    /* recent packets for the same-board test (rows and frame times give the packet index) */
+    struct { float t, row, rpc; uint16_t seed; uint8_t id, ch; } recent[RS_TRACK_RECENT];
+    int      nrecent, recent_head;
 } rs_track_t;
 
 typedef struct {
     rs_track_t tracks[RS_MAX_TRACKS];
+    float link[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* pair evidence: identical data packets in the same frame, decayed */
+    unsigned char linked[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* current link state (hysteresis) */
     int next_id;
     int nblobs;                /* blobs found in the last frame */
     rs_blob_t blobs[RS_MAX_BLOBS];
@@ -42,7 +50,11 @@ void rs_multi_init(rs_multi_t *m);
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                      int r_off, int g_off, int b_off, float t);
 
-/* Pop the next message from any track; *track_id receives the source. */
+/* Logical source of the i-th reported track: its own id, or the id of the track it is linked
+ * to because both lights transmit the same packets (two LEDs of one board). */
+int rs_multi_track_group(const rs_multi_t *m, int i);
+
+/* Pop the next message from any track; *track_id receives the logical source (group id). */
 int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id);
 
 size_t rs_multi_sizeof(void);
