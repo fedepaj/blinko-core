@@ -24,6 +24,9 @@ static int overlap(const rs_track_t *tr, const rs_blob_t *b)
 #ifndef RS_TRACK_ROW_EXT
 #define RS_TRACK_ROW_EXT 1.0f     /* halo rows added above and below, in blob heights */
 #endif
+#ifndef RS_TRACK_REEVAL
+#define RS_TRACK_REEVAL 8         /* frames between profile-variant comparisons */
+#endif
 #ifndef RS_TRACK_WIDE_COLS
 #define RS_TRACK_WIDE_COLS 1      /* include half a blob width of halo columns each side (matched weights sort them out) */
 #endif
@@ -83,18 +86,29 @@ static void track_feed(rs_multi_t *m, rs_track_t *tr, const uint8_t *px, int w, 
      * core, an RGB LED's white rows clip only briefly), so the decoder decides per frame: the
      * variant that yields more packets in this frame (luma plus, for a three-coloured light,
      * each camera channel) feeds the receiver; ties keep the previous choice. */
+    /* The comparison costs two profiles and up to eight decoder runs, so it is made every
+     * RS_TRACK_REEVAL frames, or right after a frame in which the current variant decoded
+     * nothing; in between the track keeps its choice. */
     static float a_r[RS_DEC_MAX_ROWS], a_g[RS_DEC_MAX_ROWS], a_b[RS_DEC_MAX_ROWS];
-    rs_frame_info_t ia;
-    rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 0, a_r, a_g, a_b, &ia);
-    rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 1, s_r, s_g, s_b, &info);
-    if (info.kept_cols < 1.0f) {            /* the two variants differ only when something clips */
-        int ya = profile_yield(&tr->rx, a_r, a_g, a_b, h), yb = profile_yield(&tr->rx, s_r, s_g, s_b, h);
-        if (ya > yb || (ya == yb && !tr->drop_clipped)) {
-            tr->drop_clipped = 0;
+    int reeval = (tr->seen_frames % RS_TRACK_REEVAL) == 1 || tr->last_packets == 0;
+    if (reeval) {
+        rs_frame_info_t ia;
+        rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 0, a_r, a_g, a_b, &ia);
+        rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 1, s_r, s_g, s_b, &info);
+        if (info.kept_cols < 1.0f) {        /* the two variants differ only when something clips */
+            int ya = profile_yield(&tr->rx, a_r, a_g, a_b, h), yb = profile_yield(&tr->rx, s_r, s_g, s_b, h);
+            if (ya > yb || (ya == yb && !tr->drop_clipped)) {
+                tr->drop_clipped = 0;
+                for (int i = 0; i < h; i++) { s_r[i] = a_r[i]; s_g[i] = a_g[i]; s_b[i] = a_b[i]; }
+            } else tr->drop_clipped = 1;
+        } else if (!tr->drop_clipped) {
             for (int i = 0; i < h; i++) { s_r[i] = a_r[i]; s_g[i] = a_g[i]; s_b[i] = a_b[i]; }
-        } else tr->drop_clipped = 1;
+        }
+    } else {
+        rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, tr->drop_clipped, s_r, s_g, s_b, &info);
     }
     tr->packets_frame = rs_rx_process(&tr->rx, s_r, s_g, s_b, h, t);
+    tr->last_packets = tr->packets_frame;
 }
 
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
