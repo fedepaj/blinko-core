@@ -176,6 +176,11 @@ static int confirmed(const rs_track_t *tr)
 {
     return tr->active && (tr->rx.packets_total > 0 || tr->seen_frames >= RS_TRACK_CONFIRM_FRAMES);
 }
+const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i)
+{
+    const rs_track_t *tr = rs_multi_track(m, i);
+    return tr ? &tr->rx : NULL;
+}
 int rs_multi_track_count(const rs_multi_t *m)
 {
     int n = 0;

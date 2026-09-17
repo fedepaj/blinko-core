@@ -46,6 +46,8 @@ int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id);
 
 size_t rs_multi_sizeof(void);
 int rs_multi_track_count(const rs_multi_t *m);
+/* Receiver of the i-th reported track (per-track packets/stats via the rs_rx accessors). */
+const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i);
 const rs_track_t *rs_multi_track(const rs_multi_t *m, int i);   /* i-th active track, or NULL */
 
 #ifdef __cplusplus
