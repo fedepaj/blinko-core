@@ -20,11 +20,44 @@ static void push_msg(rs_rx_t *rx, const rs_message_t *m)
     rx->qlen++;
 }
 
+/* Packets sit on a grid: the transmitter sends them back to back, so from one decoded packet
+ * the others in the frame are RS_PKT_CHIPS chips away (pilot blocks and burst pauses break the
+ * grid; those positions simply fail). A packet whose sync was destroyed (clipped, smeared)
+ * can still be decoded at its predicted position: the bits survive longer than the sync. */
+static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int k, int max_out)
+{
+    if (!rx->cfg.grid_decode || k == 0) return k;
+    int n0 = k;
+    float period = 0;
+    for (int i = 0; i < n0; i++) period += out[i].rows_per_chip;
+    period = period / (float)n0 * (float)RS_PKT_CHIPS;
+    float rpc = period / (float)RS_PKT_CHIPS;
+    for (int i = 0; i < n0 && k < max_out; i++) {
+        for (int dir = -1; dir <= 1; dir += 2) {
+            for (int m = 1; m < 8 && k < max_out; m++) {
+                float pos = out[i].row_start + (float)dir * (float)m * period;
+                if (pos < 0 || pos + period > (float)n) break;
+                int taken = 0;
+                for (int j = 0; j < k; j++) if (out[j].row_start > pos - 2 * rpc && out[j].row_start < pos + 2 * rpc) { taken = 1; break; }
+                if (taken) continue;
+                static const float d[5] = { 0.0f, -0.25f, 0.25f, -0.5f, 0.5f };
+                rs_packet_t pk; int ok = 0;
+                for (int q = 0; q < 5 && !ok; q++)
+                    ok = rs_decode_at(p, n, &rx->cfg, pos + d[q] * rpc, rpc, &pk) && pk.quality >= 2.0f * rx->cfg.min_quality;
+                if (!ok) break;              /* the grid is broken here (pilot, pause, edge): stop this direction */
+                out[k++] = pk; rx->grid_ok++;
+            }
+        }
+    }
+    return k;
+}
+
 static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
 {
     rs_packet_t out[32];
     rx->cfg.rows_per_chip_hint = rx->rows_per_chip;
     int k = rs_decode_profile(p, n, &rx->cfg, out, 32, &rx->last_stats);
+    k = grid_decode(rx, p, n, out, k, 32);
     for (int i = 0; i < k && rx->npkts < RS_RX_MAX_PKTS; i++) {
         rx->pkts[rx->npkts].pkt = out[i];
         rx->pkts[rx->npkts].channel = channel;

@@ -31,6 +31,7 @@ typedef struct {
     int           mode;      /* 0 = luma, 1 = rgb (calibrated) */
     float         rows_per_chip;
     uint32_t      frames, packets_total;
+    uint32_t      grid_ok;          /* packets decoded at a predicted grid position (no sync) */
     rs_dec_stats_t last_stats;   /* of the last decoded channel */
     int           npkts;
     rs_rx_packet_t pkts[RS_RX_MAX_PKTS];

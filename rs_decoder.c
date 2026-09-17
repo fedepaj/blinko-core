@@ -29,6 +29,7 @@ void rs_dec_cfg_default(rs_dec_cfg_t *cfg)
     cfg->rows_per_chip_hint = 0.0f;
     cfg->use_edges = 0;   /* experimental: measured worse than the classic path on the corpus and in simulation */
     cfg->timing_retries = 1;
+    cfg->grid_decode = 1;
 }
 
 static float fabsf_(float x) { return x < 0 ? -x : x; }

@@ -26,6 +26,7 @@ typedef struct {
     float rows_per_chip_hint; /* receiver's current estimate (0 = unknown); used by the edge path */
     int   use_edges;          /* also run the rising-edge path for saturated signals (default 1) */
     int   timing_retries;     /* retry a failed packet with the receiver's chip clock and +-3 % (default 1) */
+    int   grid_decode;        /* receiver: also decode at predicted grid positions next to decoded packets (default 1) */
 } rs_dec_cfg_t;
 
 typedef struct {
