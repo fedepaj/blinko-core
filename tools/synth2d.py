@@ -1,4 +1,4 @@
-"""2-D synthetic camera frames: one or more defocused LED blobs transmitting RSLog streams,
+"""2-D synthetic camera frames: one or more defocused LED blobs transmitting Blinko streams,
 rolling-shutter exposure, Bayer-like colour mixing, optional motion (the blob slides while
 the frame is read out) and saturation. Produces BGRA frames like the iPhone recorder.
 """

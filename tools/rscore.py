@@ -1,7 +1,7 @@
 """ctypes wrapper around the portable C core (core/). Builds it on first use."""
 import ctypes, os, subprocess, sys, hashlib
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the rslog-core repo
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the blinko-core repo
 CORE = ROOT
 BUILD = os.path.join(ROOT, "build")
 SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c", "rs_multi.c"]

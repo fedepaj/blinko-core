@@ -1,4 +1,4 @@
-"""Decode RSLog packets from a still photo or a video frame (offline debugging).
+"""Decode Blinko packets from a still photo or a video frame (offline debugging).
 
 Usage: .venv/bin/python tools/decode_image.py IMAGE [--axis rows|columns] [--plot out.png]
 The image is converted to luma; the ROI on the cross axis is the bright blob.

@@ -1,6 +1,6 @@
-# rslog-core
+# blinko-core
 
-Portable C99 core of the RSLog optical log link (rolling-shutter camera
+Portable C99 core of the Blinko optical log link (rolling-shutter camera
 channel): protocol, transmitter with fountain coding and RGB channels,
 decoder, message assembler, colour calibration, complete receiver, frame
 profiling. No allocation, no libc beyond stdint. Used unchanged by the

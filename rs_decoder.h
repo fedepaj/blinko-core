@@ -1,5 +1,5 @@
 /*
- * rs_decoder.h — RSLog rolling-shutter decoder.
+ * rs_decoder.h — Blinko rolling-shutter decoder.
  * Input: a per-row brightness profile p[0..n-1] (row 0 = first exposed row).
  * Output: decoded packets with row positions and estimated rows-per-chip.
  * Self-calibrating: the chip length in rows is measured from each packet's

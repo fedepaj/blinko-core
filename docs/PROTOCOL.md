@@ -1,4 +1,4 @@
-# RSLog — Protocollo ottico (v2)
+# Blinko — Protocollo ottico (v2)
 
 ## Livello fisico
 
@@ -98,7 +98,7 @@ tornano.
 
 Testo generato dal firmware, es.:
 `HF pc=0x0000a3f2 lr=0x0000a1c1 cfsr=0x00000400` (hard fault),
-`WDT reset` (reset da watchdog), `FATAL 12: sensor init` (da `RSLog.fatal`).
+`WDT reset` (reset da watchdog), `FATAL 12: sensor init` (da `Blinko.fatal`).
 La causa del reset (`RSTSR0/1/2`) è inclusa nello STATUS a ogni boot.
 
 ## Parametri raccomandati (da confermare in calibrazione)
