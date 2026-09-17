@@ -4,7 +4,7 @@ Usage: .venv/bin/python tools/test_core.py [--quick]
 """
 import sys, numpy as np
 from rscore import Transmitter, Decoder, Assembler, Receiver, encode_packet, pack6, unpack6, RS_PKT_CHIPS, LEVELS
-from simulate import rolling_shutter_profile, true_packet_at
+from simulate import rolling_shutter_profile, true_packet_at, matches_truth
 
 
 def make_stream():
@@ -53,6 +53,7 @@ def sweep(quick=False):
             for noise in [1.0, 3.0]:
                 cases.append((rpc, exp_frac, noise, 0.6))
     cases += [(8, 0.5, 2.0, 0.15), (8, 0.5, 2.0, 0.3), (8, 0.5, 6.0, 0.6), (4, 0.5, 4.0, 0.6)]
+    sat_cases = [(6, 0.5, 2.0, 0.6, 900.0), (6, 1.0, 2.0, 0.6, 2500.0), (4, 0.8, 2.0, 0.6, 1200.0)]   # saturating LED (amplitude >> 255)
     total_wrong = 0
     for rpc, exp_frac, noise, blob_frac in cases:
         n_frames = 40 if quick else 120
@@ -65,13 +66,23 @@ def sweep(quick=False):
             pkts = dec.decode(p)
             crcfail += dec.stats.crc_fail
             for pk in pkts:
-                i, sd, pl, phase, err = true_packet_at(pk.row_start, rpc, off, packets)
-                if (i, sd, pl) == (pk.id, pk.seed, pk.payload):
-                    good += 1
-                else:
-                    wrong += 1
+                if matches_truth(pk, rpc, off, packets): good += 1
+                else: wrong += 1
         total_wrong += wrong
         print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}")
+    for rpc, exp_frac, noise, blob_frac, amp in sat_cases:
+        n_frames = 40 if quick else 120
+        good = wrong = crcfail = 0
+        for _ in range(n_frames):
+            off = rng.uniform(0, RS_PKT_CHIPS)
+            b0 = rng.uniform(0.05, 0.95 - blob_frac)
+            p = rolling_shutter_profile(chips, rows, rpc, exp_frac, off, blob=(b0, b0 + blob_frac), amplitude=amp, noise=noise, rng=rng)
+            pkts = dec.decode(p); crcfail += dec.stats.crc_fail
+            for pk in pkts:
+                if matches_truth(pk, rpc, off, packets): good += 1
+                else: wrong += 1
+        total_wrong += wrong
+        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}   saturating (amplitude {amp:.0f})")
     print("total wrong packets:", total_wrong)
     return total_wrong
 
@@ -122,7 +133,7 @@ def fountain_test():
         assert got and got[2] == text, got
         need.append(count)
     # corruption: 2% of packets get a wrong payload (as if a CRC-8 false accept); never deliver garbage
-    bad = 0; delivered = 0
+    bad = 0; delivered = 0; rec_total = 0; reset_total = 0
     for _ in range(300):
         asm = Assembler(); order = list(range(len(packets))); rng.shuffle(order)
         for k in order[:120]:
@@ -133,7 +144,8 @@ def fountain_test():
             if m:
                 delivered += 1
                 if m[2] != text: bad += 1
-    print(f"fountain: with 2% corrupted packets: {delivered} deliveries in 300 runs, {bad} wrong")
+        rec_total += asm.recovered; reset_total += asm.resets
+    print(f"fountain: with 2% corrupted packets: {delivered} deliveries in 300 runs, {bad} wrong (recovered {rec_total}, resets {reset_total})")
     assert bad == 0, "garbage message delivered"
     import statistics
     print(f"fountain: message of {n} packed bytes ({len(text)} chars): mean {statistics.mean(need):.1f} random packets to complete (min {min(need)}, max {max(need)}); coupon-collector would be ~{n*sum(1/i for i in range(1,n+1)):.0f}")

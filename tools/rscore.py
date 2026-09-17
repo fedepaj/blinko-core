@@ -23,9 +23,11 @@ def _build():
             continue
         with open(os.path.join(CORE, f), "rb") as fh:
             h.update(fh.read())
+    extra = os.environ.get("RS_CFLAGS", "").split()
+    h.update(" ".join(extra).encode())
     lib = os.path.join(BUILD, f"librscore-{h.hexdigest()[:10]}.dylib")
     if not os.path.exists(lib):
-        cmd = ["cc", "-std=c99", "-O2", "-fPIC", "-shared", "-o", lib] + [os.path.join(CORE, s) for s in SRCS]
+        cmd = ["cc", "-std=c99", "-O2", "-fPIC", "-shared", "-o", lib] + extra + [os.path.join(CORE, s) for s in SRCS]
         subprocess.check_call(cmd)
     return lib
 
@@ -46,7 +48,7 @@ class Tx(ctypes.Structure):
 
 class DecCfg(ctypes.Structure):
     _fields_ = [(n, ctypes.c_float) for n in
-                ("min_rows_per_chip", "max_rows_per_chip", "sync_tol", "min_contrast", "pll_gain", "min_quality")]
+                ("min_rows_per_chip", "max_rows_per_chip", "sync_tol", "min_contrast", "pll_gain", "min_quality", "rows_per_chip_hint")] + [("use_edges", ctypes.c_int)]
 
 
 class Packet(ctypes.Structure):
@@ -67,7 +69,9 @@ class AsmSlot(ctypes.Structure):
                 ("rank", ctypes.c_uint8), ("pivot_have", ctypes.c_uint32),
                 ("pivot_mask", ctypes.c_uint32 * 32), ("pivot_val", ctypes.c_uint8 * 32),
                 ("pend_seed", ctypes.c_uint16 * 24), ("pend_val", ctypes.c_uint8 * 24), ("npend", ctypes.c_uint8),
-                ("data", ctypes.c_uint8 * RS_MSG_MAX_LEN), ("packets", ctypes.c_uint32), ("resets", ctypes.c_uint32)]
+                ("data", ctypes.c_uint8 * RS_MSG_MAX_LEN),
+                ("raw_mask", ctypes.c_uint32 * 56), ("raw_val", ctypes.c_uint8 * 56), ("nraw", ctypes.c_uint8), ("raw_head", ctypes.c_uint8),
+                ("packets", ctypes.c_uint32), ("resets", ctypes.c_uint32), ("recovered", ctypes.c_uint32), ("contradictions", ctypes.c_uint8), ("meta_strikes", ctypes.c_uint8)]
 
 
 class Asm(ctypes.Structure):
@@ -107,6 +111,9 @@ _lib.rs_decode_profile.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int,
                                    ctypes.POINTER(Packet), ctypes.c_int, ctypes.POINTER(Stats)]
 _lib.rs_decode_profile.restype = ctypes.c_int
 _lib.rs_asm_init.argtypes = [ctypes.POINTER(Asm)]
+_lib.rs_asm_sizeof.restype = ctypes.c_size_t
+_lib.rs_asm_recovered.argtypes = [ctypes.POINTER(Asm)]; _lib.rs_asm_recovered.restype = ctypes.c_uint32
+assert ctypes.sizeof(Asm) == _lib.rs_asm_sizeof(), f"rs_asm_t layout mismatch: python {ctypes.sizeof(Asm)} vs C {_lib.rs_asm_sizeof()}"
 _lib.rs_asm_feed.argtypes = [ctypes.POINTER(Asm), ctypes.POINTER(Packet), ctypes.POINTER(Message)]
 _lib.rs_asm_feed.restype = ctypes.c_int
 
@@ -216,6 +223,12 @@ class Assembler:
     def __init__(self):
         self.a = Asm()
         _lib.rs_asm_init(ctypes.byref(self.a))
+
+    @property
+    def recovered(self): return _lib.rs_asm_recovered(ctypes.byref(self.a))
+
+    @property
+    def resets(self): return sum(self.a.slots[i].resets for i in range(RS_NUM_SLOTS))
 
     def feed(self, pkt: Packet):
         m = Message()

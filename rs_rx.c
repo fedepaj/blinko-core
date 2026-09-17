@@ -23,6 +23,7 @@ static void push_msg(rs_rx_t *rx, const rs_message_t *m)
 static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
 {
     rs_packet_t out[32];
+    rx->cfg.rows_per_chip_hint = rx->rows_per_chip;
     int k = rs_decode_profile(p, n, &rx->cfg, out, 32, &rx->last_stats);
     for (int i = 0; i < k && rx->npkts < RS_RX_MAX_PKTS; i++) {
         rx->pkts[rx->npkts].pkt = out[i];
@@ -79,3 +80,10 @@ int rs_rx_packet_at(const rs_rx_t *rx, int i, rs_packet_t *pkt, uint8_t *channel
     *pkt = rx->pkts[i].pkt; *channel = rx->pkts[i].channel; return 1;
 }
 const rs_dec_stats_t *rs_rx_stats(const rs_rx_t *rx) { return &rx->last_stats; }
+
+uint32_t rs_rx_resets(const rs_rx_t *rx)
+{
+    uint32_t n = 0;
+    for (int i = 0; i < RS_NUM_SLOTS; i++) n += rx->assembler.slots[i].resets;
+    return n;
+}

@@ -63,11 +63,16 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
         if (run_lvl[i] != 1) continue;
         float P = (float)run_len[i];
         if (P < 3) continue;
+        /* three pulses of equal width; the two gaps equal to each other and not
+         * shorter than 30 % of a pulse (a saturating LED lengthens ON runs and
+         * shortens OFF runs by the exposure smear, on all three alike) */
         int ok = 1;
-        for (int k = 1; k < 5; k++) if (fabsf_((float)run_len[i + k] - P) > 0.35f * P) { ok = 0; break; }
+        for (int k = 2; k < 5; k += 2) if (fabsf_((float)run_len[i + k] - P) > 0.3f * P) { ok = 0; break; }
+        float G = (float)run_len[i + 1];
+        if (ok && (fabsf_((float)run_len[i + 3] - G) > 0.35f * G || G < 0.3f * P || G > 1.6f * P)) ok = 0;
         if (!ok) continue;
-        if (run_lvl[i - 1] != 0 || (float)run_len[i - 1] < 1.5f * P) continue;
-        if (run_lvl[i + 5] != 0 || (float)run_len[i + 5] < 1.5f * P) continue;
+        if (run_lvl[i - 1] != 0 || (float)run_len[i - 1] < 1.5f * G) continue;
+        if (run_lvl[i + 5] != 0 || (float)run_len[i + 5] < 1.5f * G) continue;
         /* found: measure RGB in the middle half of each pulse minus the dark baseline */
         float base[3], m[3][3], v[3];
         mean3(r, g, b, run_start[i + 1] + run_len[i + 1] / 4, run_start[i + 1] + 3 * run_len[i + 1] / 4, base);

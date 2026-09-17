@@ -69,3 +69,11 @@ const rs_dec_stats_t *rs_rx_stats(const rs_rx_t *rx);
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+uint32_t rs_rx_resets(const rs_rx_t *rx);       /* assembler slot resets (poisoned or replaced messages) */
+#ifdef __cplusplus
+}
+#endif

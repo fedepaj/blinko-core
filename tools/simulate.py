@@ -40,7 +40,7 @@ def rolling_shutter_profile(chips, rows, rows_per_chip, exposure_chips, offset_c
     envelope = 0.5 * (np.tanh((x - blob[0]) / s) - np.tanh((x - blob[1]) / s))
     p = ambient + amplitude * envelope * led + rng.normal(0, noise, rows)
     if quantize:
-        p = np.clip(np.round(p), 0, 255)
+        p = np.clip(np.round(p), 0, 255)      # amplitude > 255 reproduces a saturating LED
     return p.astype(np.float32)
 
 
@@ -54,3 +54,17 @@ def true_packet_at(row, rows_per_chip, offset_chips, packets):
     idx = (k // RS_PKT_CHIPS) % n
     phase = k % RS_PKT_CHIPS
     return packets[idx][0], packets[idx][1], packets[idx][2], phase, abs(chip - k)
+
+
+def matches_truth(pk, rows_per_chip, offset_chips, packets):
+    """True if the decoded packet equals the ground truth at its row or at the adjacent packet
+    (the exposure smear can shift row_start by up to a chip)."""
+    chip = pk.row_start / rows_per_chip + offset_chips
+    k = int(np.round(chip)); n = len(packets)
+    from rscore import RS_PKT_CHIPS
+    base = k // RS_PKT_CHIPS
+    for d in (0, -1, 1):
+        t = packets[(base + d) % n]
+        if (t[0], t[1], t[2]) == (pk.id, pk.seed, pk.payload):
+            return True
+    return False

@@ -23,6 +23,8 @@ typedef struct {
     float min_contrast;       /* min local (max-min) to trust a row, profile units, default 6 */
     float pll_gain;           /* mid-bit edge phase correction, default 0.35 */
     float min_quality;        /* reject packets whose weakest bit confidence < this, default 0.05 */
+    float rows_per_chip_hint; /* receiver's current estimate (0 = unknown); used by the edge path */
+    int   use_edges;          /* also run the rising-edge path for saturated signals (default 1) */
 } rs_dec_cfg_t;
 
 typedef struct {
