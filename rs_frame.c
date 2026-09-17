@@ -9,6 +9,13 @@
 #include "rs_frame.h"
 
 #define RS_FRAME_DS        8
+#ifndef RS_SAT_LEVEL
+#define RS_SAT_LEVEL 250      /* pixel value treated as clipped */
+#endif
+#ifndef RS_SAT_MIN_COLS
+#define RS_SAT_MIN_COLS 8     /* unclipped columns needed to drop the clipped ones */
+#endif
+
 #define RS_FRAME_MAX_CROSS 512
 
 typedef struct {
@@ -83,21 +90,37 @@ void rs_frame_profile_rgb(const uint8_t *px, int w, int h, int row_stride, int p
                           int r_off, int g_off, int b_off, int axis,
                           float *r, float *g, float *b, rs_frame_info_t *info)
 {
+    static uint16_t sat_col[4096];
     rs_view_t v; make_view(&v, px, w, h, row_stride, pixel_stride, axis, 3, r_off, g_off, b_off);
     int c0, c1; cross_window(&v, &c0, &c1);
     int len = c1 - c0, peak = 0, sat = 0;
-    float inv = 1.0f / (float)len;
+    if (len > 4096) len = 4096;
+    /* same clipped-column exclusion as rs_frame_profile_rgb_blob (the halo keeps the gaps) */
+    for (int c = 0; c < len; c++) sat_col[c] = 0;
     for (int s = 0; s < v.n_scan; s++) {
         const uint8_t *p = v.px + s * v.st_scan + c0 * v.st_cross;
-        uint32_t sr = 0, sg = 0, sb = 0; int mx = 0;
+        int mx = 0;
         for (int c = 0; c < len; c++, p += v.st_cross) {
             int pr = p[r_off], pg = p[g_off], pb = p[b_off];
-            sr += pr; sg += pg; sb += pb;
-            if (pr > mx) mx = pr; if (pg > mx) mx = pg; if (pb > mx) mx = pb;
+            int m = pr > pg ? pr : pg; if (pb > m) m = pb;
+            if (m >= RS_SAT_LEVEL) sat_col[c]++;
+            if (m > mx) mx = m;
         }
-        r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
         if (mx > peak) peak = mx;
         if (mx >= 250) sat++;
+    }
+    int kept = 0;
+    for (int c = 0; c < len; c++) if (sat_col[c] < 2) kept++;
+    int use_mask = kept >= RS_SAT_MIN_COLS && kept < len;
+    float inv = 1.0f / (float)(use_mask ? kept : len);
+    for (int s = 0; s < v.n_scan; s++) {
+        const uint8_t *p = v.px + s * v.st_scan + c0 * v.st_cross;
+        uint32_t sr = 0, sg = 0, sb = 0;
+        for (int c = 0; c < len; c++, p += v.st_cross) {
+            if (use_mask && sat_col[c] >= 2) continue;
+            sr += p[r_off]; sg += p[g_off]; sb += p[b_off];
+        }
+        r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
     }
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
@@ -199,7 +222,11 @@ int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pi
                 label[n] = (int16_t)nb; stack[sp++] = n;
             }
         }
-        if (area < 4 || area > (tw * th) / 2) { blobs[nb].area = 0; blobs[nb].peak = 0; nb++; continue; }   /* speck or whole frame: not a LED */
+        /* not a LED: speck, whole frame, one-cell-wide line (sensor column noise stretched by the
+         * vertical max filter) or too dim in absolute terms (noise when the real light is off) */
+        if (area < 4 || area > (tw * th) / 2 || maxx - minx < 2 || maxy - miny < 2 || peak < 48.0f || peak < mn + 40.0f) {
+            blobs[nb].area = 0; blobs[nb].peak = 0; nb++; continue;
+        }
         rs_blob_t b;
         b.r0 = miny * ds; b.r1 = (maxy + 1) * ds; if (b.r1 > h) b.r1 = h;
         b.c0 = minx * ds; b.c1 = (maxx + 1) * ds; if (b.c1 > w) b.c1 = w;
@@ -226,22 +253,46 @@ void rs_frame_profile_rgb_blob(const uint8_t *px, int w, int h, int row_stride, 
                                int r_off, int g_off, int b_off, const rs_blob_t *blob,
                                float *r, float *g, float *b, rs_frame_info_t *info)
 {
+    static uint16_t sat_col[RS_SEG_TW * RS_FRAME_DS + 64];
     int c0 = blob->c0, c1 = blob->c1; if (c0 < 0) c0 = 0; if (c1 > w) c1 = w;
     int len = c1 - c0; if (len < 1) len = 1;
-    float inv = 1.0f / (float)len;
+    if (len > (int)(sizeof(sat_col) / sizeof(sat_col[0]))) len = (int)(sizeof(sat_col) / sizeof(sat_col[0]));
+    int r0 = blob->r0 < 0 ? 0 : blob->r0, r1 = blob->r1 > h ? h : blob->r1;
+    /* A clipped LED core loses the 1-chip gaps (exposure smear amplified by saturation) while the
+     * halo around it keeps them. Find the columns that clip in at least two rows and, when enough
+     * columns are left, average only the others. The column set is fixed for the whole frame so
+     * every row is measured by the same estimator. */
     int peak = 0, sat = 0;
-    for (int s = 0; s < h; s++) {
-        if (s < blob->r0 || s >= blob->r1) { r[s] = g[s] = b[s] = 0; continue; }
+    for (int c = 0; c < len; c++) sat_col[c] = 0;
+    for (int s = r0; s < r1; s++) {
         const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
-        uint32_t sr = 0, sg = 0, sb = 0; int mx = 0;
+        int mx = 0;
         for (int c = 0; c < len; c++, p += pixel_stride) {
             int pr = p[r_off], pg = p[g_off], pb = p[b_off];
-            sr += pr; sg += pg; sb += pb;
-            if (pr > mx) mx = pr; if (pg > mx) mx = pg; if (pb > mx) mx = pb;
+            int m = pr > pg ? pr : pg; if (pb > m) m = pb;
+            if (m >= RS_SAT_LEVEL) sat_col[c]++;
+            if (m > mx) mx = m;
         }
-        r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
         if (mx > peak) peak = mx;
         if (mx >= 250) sat++;
+    }
+    int kept = 0;
+    for (int c = 0; c < len; c++) if (sat_col[c] < 2) kept++;
+    int use_mask = kept >= RS_SAT_MIN_COLS && kept < len;
+    float inv = 1.0f / (float)(use_mask ? kept : len);
+    for (int s = 0; s < h; s++) {
+        if (s < r0 || s >= r1) { r[s] = g[s] = b[s] = 0; continue; }
+        const uint8_t *p = px + s * row_stride + c0 * pixel_stride;
+        uint32_t sr = 0, sg = 0, sb = 0;
+        if (use_mask) {
+            for (int c = 0; c < len; c++, p += pixel_stride) {
+                if (sat_col[c] >= 2) continue;
+                sr += p[r_off]; sg += p[g_off]; sb += p[b_off];
+            }
+        } else {
+            for (int c = 0; c < len; c++, p += pixel_stride) { sr += p[r_off]; sg += p[g_off]; sb += p[b_off]; }
+        }
+        r[s] = sr * inv; g[s] = sg * inv; b[s] = sb * inv;
     }
     info->roi_start = c0; info->roi_end = c1; info->count = h;
     info->peak = peak; info->sat_frac = (float)sat / (float)h;

@@ -1,12 +1,13 @@
 """Replay a .rsrec recording through the C receiver exactly as the app does.
 
-  replay.py REC.rsrec [--axis rows|columns] [--json out.json] [--png N out.png] [--quiet]
+  replay.py REC.rsrec [--axis rows|columns] [--multi] [--json out.json] [--png N out.png] [--quiet]
 
 Prints per-recording metrics: frames, fps, packets/s, messages, RGB lock, pilots, resets.
+--multi runs the multi-source path (segmentation + one receiver per light) instead of the global ROI.
 """
 import argparse, ctypes, json, sys, time
 import numpy as np
-from rscore import _lib, Receiver, LEVELS
+from rscore import _lib, Receiver, Multi, LEVELS
 from rsrec import Recording
 
 
@@ -32,16 +33,23 @@ def profiles_bgra(a, axis):
     return r[:c], g[:c], b[:c], info
 
 
-def replay(path, axis="rows", quiet=False, rx=None):
+def replay(path, axis="rows", quiet=False, rx=None, multi=False):
     rec = Recording(path)
-    rx = rx or Receiver()
+    rx = rx or (Multi() if multi else Receiver())
     frames = len(rec); t0 = rec.frames[0][1] if frames else 0
-    packets = 0; messages = []; per_frame = []; modes = []; conds = []; peaks = []; sats = []
+    packets = 0; messages = []; per_frame = []; modes = []; conds = []; peaks = []; sats = []; ntracks = []; track_ids = set()
     for k in range(frames):
         ts, gyro, accel, a = rec.frame(k)
-        r, g, b, info = profiles_bgra(a, axis)
-        n, msgs = rx.process(r, g, b, ts)
-        packets += n; per_frame.append(n); modes.append(rx.mode); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
+        if multi:
+            n, msgs = rx.process(a, ts)
+            tr = rx.tracks(); ntracks.append(len(tr)); track_ids.update(t["id"] for t in tr)
+            modes.append(any(t["mode"] == "rgb" for t in tr)); conds.append(0); peaks.append(0); sats.append(0)
+            msgs = [(f"#{m[0]} s{m[1]}", m[2], m[3]) for m in msgs]
+        else:
+            r, g, b, info = profiles_bgra(a, axis)
+            n, msgs = rx.process(r, g, b, ts)
+            modes.append(rx.mode); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
+        packets += n; per_frame.append(n)
         for m in msgs:
             messages.append((round(ts - t0, 3), m[0], m[1], m[2]))
             if not quiet: print(f"  {ts - t0:6.3f}s  slot {m[0]} {m[1]:6s} {m[2]}")
@@ -50,8 +58,11 @@ def replay(path, axis="rows", quiet=False, rx=None):
         "file": path.split('/')[-1], "note": rec.header.get("note", ""), "frames": frames, "duration_s": round(dur, 3),
         "fps": round((frames - 1) / dur, 1) if frames > 1 else 0, "packets": packets, "pkt_per_s": round(packets / dur, 1),
         "frames_with_packets": int(sum(1 for n in per_frame if n)), "messages": len(messages),
-        "rgb_frames": int(sum(modes)), "pilots": rx.pilots, "cond_mean": round(float(np.mean(conds)), 2) if conds else 0,
-        "resets": int(_lib.rs_rx_resets(rx.buf)), "peak_max": int(max(peaks) if peaks else 0),
+        "rgb_frames": int(sum(modes)), "pilots": (sum(t["pilots"] for t in rx.tracks()) if multi else rx.pilots),
+        "cond_mean": round(float(np.mean(conds)), 2) if conds else 0,
+        "resets": 0 if multi else int(_lib.rs_rx_resets(rx.buf)), "peak_max": int(max(peaks) if peaks else 0),
+        "tracks_mean": round(float(np.mean(ntracks)), 2) if ntracks else 0, "tracks_max": int(max(ntracks) if ntracks else 0),
+        "track_ids": len(track_ids),
         "sat_mean": round(float(np.mean(sats)), 3) if sats else 0,
         "exposure_us": rec.header.get("exposureUs"), "iso": rec.header.get("iso"), "cam_fps": rec.header.get("fps"),
         "message_list": messages,
@@ -63,6 +74,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+"); ap.add_argument("--axis", default="rows")
     ap.add_argument("--json"); ap.add_argument("--png", nargs=2, metavar=("FRAME", "OUT")); ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--multi", action="store_true", help="multi-source path (segmentation + one receiver per light)")
     a = ap.parse_args()
     if a.png:
         from PIL import Image
@@ -71,10 +83,11 @@ def main():
     results = []
     for f in a.files:
         print(f"== {f.split('/')[-1]}")
-        s = replay(f, a.axis, a.quiet)
+        s = replay(f, a.axis, a.quiet, multi=a.multi)
         results.append(s)
         print(f"   note={s['note']!r} frames={s['frames']} fps={s['fps']} pkt/s={s['pkt_per_s']} frames_with_pkts={s['frames_with_packets']} "
-              f"msgs={s['messages']} rgb_frames={s['rgb_frames']} pilots={s['pilots']} cond={s['cond_mean']} resets={s['resets']} peak={s['peak_max']} sat={s['sat_mean']}")
+              f"msgs={s['messages']} rgb_frames={s['rgb_frames']} pilots={s['pilots']} cond={s['cond_mean']} resets={s['resets']} peak={s['peak_max']} sat={s['sat_mean']}"
+              + (f" tracks={s['tracks_mean']}/{s['tracks_max']} ids={s['track_ids']}" if a.multi else ""))
     if a.json:
         json.dump(results, open(a.json, 'w'), indent=1); print("wrote", a.json)
 
