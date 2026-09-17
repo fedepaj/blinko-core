@@ -39,7 +39,7 @@ class Slot(ctypes.Structure):
 
 class Tx(ctypes.Structure):
     _fields_ = [("slots", Slot * RS_NUM_SLOTS), ("seq_counter", ctypes.c_uint32), ("next_log_slot", ctypes.c_uint8),
-                ("round", ctypes.c_uint8 * RS_NUM_SLOTS), ("round_len", ctypes.c_uint8), ("round_pos", ctypes.c_uint8),
+                ("round", ctypes.c_uint8 * (RS_NUM_SLOTS * 4)), ("fault_weight", ctypes.c_uint8), ("round_len", ctypes.c_uint8), ("round_pos", ctypes.c_uint8),
                 ("cur", Slot), ("cur_id", ctypes.c_uint8), ("cur_sent", ctypes.c_uint8), ("visit_len", ctypes.c_uint8),
                 ("burst_on", ctypes.c_uint32), ("burst_off", ctypes.c_uint32), ("burst_pos", ctypes.c_uint32), ("in_pause", ctypes.c_uint8),
                 ("nchan", ctypes.c_uint8), ("pilot_period", ctypes.c_uint32), ("pilot_pos", ctypes.c_uint32), ("in_pilot", ctypes.c_uint8), ("pilot_idx", ctypes.c_uint32),
@@ -172,6 +172,9 @@ class Transmitter:
         i, s, p = ctypes.c_uint8(), ctypes.c_uint16(), ctypes.c_uint8()
         _lib.rs_tx_next_packet(ctypes.byref(self.tx), ctypes.byref(i), ctypes.byref(s), ctypes.byref(p))
         return i.value, s.value, p.value
+
+    def set_fault_weight(self, w: int):
+        _lib.rs_tx_set_fault_weight(ctypes.byref(self.tx), w)
 
     def set_burst(self, on_chips: int, off_chips: int):
         _lib.rs_tx_set_burst(ctypes.byref(self.tx), on_chips, off_chips)
