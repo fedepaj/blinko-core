@@ -8,6 +8,7 @@
 #define RS_RGB_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,4 +37,12 @@ void rs_rgb_unmix(const rs_rgb_cal_t *cal, const float *r, const float *g, const
 #ifdef __cplusplus
 }
 #endif
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+size_t rs_rgb_cal_sizeof(void);
+#ifdef __cplusplus
+}
 #endif

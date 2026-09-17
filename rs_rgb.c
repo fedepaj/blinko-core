@@ -89,7 +89,7 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
         }
         if (!ok) continue;
         float inv[3][3], cond;
-        if (!invert3(m, inv, &cond)) continue;
+        if (!invert3(m, inv, &cond) || cond < 0.35f) continue;   /* degenerate colour response: not a usable pilot */
         float a = cal->valid ? 0.5f : 1.0f;
         for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = a * m[c][k] + (1 - a) * cal->m[c][k];
         if (!invert3(cal->m, cal->inv, &cal->cond)) { for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = m[c][k]; invert3(cal->m, cal->inv, &cal->cond); }
@@ -112,3 +112,6 @@ void rs_rgb_unmix(const rs_rgb_cal_t *cal, const float *r, const float *g, const
         o2[i] = cal->inv[2][0] * x + cal->inv[2][1] * y + cal->inv[2][2] * z;
     }
 }
+
+#include <stddef.h>
+size_t rs_rgb_cal_sizeof(void) { return sizeof(rs_rgb_cal_t); }
