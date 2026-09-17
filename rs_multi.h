@@ -30,6 +30,8 @@ typedef struct {
     int      last_packets;     /* packets from the previous frame (0 triggers a variant re-evaluation) */
     int      frames_since_eval;
     int      group;            /* logical source: the smallest track id among the lights sending the same packets */
+    float    amp_typ;          /* typical packet amplitude of this light (EMA); leaks are far dimmer */
+    int      amp_n;
     /* recent packets for the same-board test (rows and frame times give the packet index) */
     struct { float t, row, rpc; uint16_t seed; uint8_t id, ch; } recent[RS_TRACK_RECENT];
     int      nrecent, recent_head;
@@ -39,6 +41,7 @@ typedef struct {
     rs_track_t tracks[RS_MAX_TRACKS];
     float link[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* pair evidence: identical data packets in the same frame, decayed */
     unsigned char linked[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* current link state (hysteresis) */
+    unsigned char keep[RS_MAX_TRACKS][RS_RX_MAX_PKTS];    /* per-frame cross-talk mask */
     int next_id;
     int nblobs;                /* blobs found in the last frame */
     rs_blob_t blobs[RS_MAX_BLOBS];

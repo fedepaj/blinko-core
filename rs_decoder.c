@@ -120,7 +120,7 @@ static int decode_bits(const float *p, int n, const rs_dec_cfg_t *cfg,
                        float t0, float t2, float rpc, float smear, rs_packet_t *pkt, rs_dec_stats_t *st)
 {
     float pos = t2;
-    float quality = 1.0f;
+    float quality = 1.0f, amp_sum = 0;
     uint32_t bits = 0; /* 29 bits, MSB first: start + id(3) seed(9) payload(8) crc(8) */
     (void)smear;
     int edge_mode = 0;   /* the classic path only sees symmetric syncs; asymmetry is handled by decode_edges */
@@ -155,6 +155,7 @@ static int decode_bits(const float *p, int n, const rs_dec_cfg_t *cfg,
             }
         }
         if (conf < quality) quality = conf;
+        amp_sum += fabsf_(second - first) / rpc;
         bits = (bits << 1) | (uint32_t)bit;
         pos += 2 * rpc;
     }
@@ -171,6 +172,7 @@ static int decode_bits(const float *p, int n, const rs_dec_cfg_t *cfg,
     pkt->row_end = pos;
     pkt->rows_per_chip = rpc;
     pkt->quality = quality;
+    pkt->amplitude = amp_sum / (float)RS_PKT_BITS;
     st->crc_ok++;
     return 1;
 }

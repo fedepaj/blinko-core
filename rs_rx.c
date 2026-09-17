@@ -65,9 +65,23 @@ static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
         rx->npkts++;
         rx->packets_total++;
         rx->rows_per_chip = rx->rows_per_chip == 0 ? out[i].rows_per_chip : 0.9f * rx->rows_per_chip + 0.1f * out[i].rows_per_chip;
+        if (rx->defer_assembly) continue;
         rs_message_t m;
         if (rs_asm_feed(&rx->assembler, &out[i], &m)) push_msg(rx, &m);
     }
+}
+
+void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep)
+{
+    int n = 0;
+    for (int i = 0; i < rx->npkts; i++) {
+        if (keep && !keep[i]) { rx->packets_total--; continue; }
+        rs_message_t m;
+        if (rs_asm_feed(&rx->assembler, &rx->pkts[i].pkt, &m)) push_msg(rx, &m);
+        if (n != i) rx->pkts[n] = rx->pkts[i];
+        n++;
+    }
+    rx->npkts = n;
 }
 
 int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n)

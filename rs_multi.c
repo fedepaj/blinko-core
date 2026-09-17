@@ -43,8 +43,9 @@ static void profile_box(const rs_multi_t *m, const rs_track_t *self, const rs_bl
     for (int k = 0; k < RS_MAX_TRACKS; k++) {
         const rs_track_t *o = &m->tracks[k];
         if (!o->active || o == self || o->seen_frames == 0) continue;
-        /* only neighbours sharing columns can mix into the row profile */
-        if (o->c1 <= e->c0 || o->c0 >= e->c1) continue;
+        /* any neighbour above or below can leak into the halo rows: stripes of a bright LED
+         * spread across the whole frame width (flare, row gain), so a light that is dark for
+         * a moment would decode its neighbour's packets in its extended rows */
         if (o->r1 <= u->r0 && e->r0 < (o->r1 + u->r0) / 2) e->r0 = (o->r1 + u->r0) / 2;   /* neighbour above */
         if (o->r0 >= u->r1 && e->r1 > (u->r1 + o->r0) / 2) e->r1 = (u->r1 + o->r0) / 2;   /* neighbour below */
     }
@@ -168,7 +169,8 @@ static float pair_evidence(const rs_track_t *ta, const rs_rx_packet_t *pa, float
     (void)ta;
     return e;
 }
-static void remember_packets(rs_track_t *tr, float t)
+static void remember_packets(rs_track_t *tr, float t);
+static void remember_packets_impl(rs_track_t *tr, float t)
 {
     for (int i = 0; i < tr->rx.npkts; i++) {
         __typeof__(tr->recent[0]) *r = &tr->recent[tr->recent_head];
@@ -178,11 +180,94 @@ static void remember_packets(rs_track_t *tr, float t)
         if (tr->nrecent < RS_TRACK_RECENT) tr->nrecent++;
     }
 }
+/* Cross-talk: the stripes of a bright LED spread across the whole frame width (flare, row
+ * gain), so a track whose own light is dark for a moment decodes its neighbour's packets in
+ * its halo rows. The same packet decoded by two tracks in the same frame at the same row is
+ * one packet: it belongs to the track whose own blob rows contain that row; the other copy is
+ * dropped before assembly (a foreign CRC packet would poison a slot for good). */
+static int in_rows(const rs_track_t *tr, float row)
+{
+    float h = (float)(tr->r1 - tr->r0);
+    return row >= tr->r0 - 0.25f * h && row <= tr->r1 + 0.25f * h;
+}
+static float pair_evidence(const rs_track_t *ta, const rs_rx_packet_t *pa, float t, const rs_track_t *tb, int skip_same_frame);
+#ifndef RS_LEAK_AMP
+#define RS_LEAK_AMP 0.3f   /* a packet under this fraction of the track's typical amplitude is another light's */
+#endif
+static void drop_crosstalk(rs_multi_t *m, float t)
+{
+    for (int k = 0; k < RS_MAX_TRACKS; k++) for (int i = 0; i < RS_RX_MAX_PKTS; i++) m->keep[k][i] = 1;
+    /* amplitude: a neighbour's stripes spread across the frame far dimmer than that light's
+     * own packets. A packet that fits another track's carousel timing (same-board relation)
+     * and is under RS_LEAK_AMP of that track's typical amplitude is that light's leak. */
+    for (int a = 0; a < RS_MAX_TRACKS; a++) {
+        rs_track_t *ta = &m->tracks[a];
+        if (!ta->active) continue;
+        for (int i = 0; i < ta->rx.npkts; i++) {
+            const rs_rx_packet_t *pa = &ta->rx.pkts[i];
+            float amp = pa->pkt.amplitude;
+            for (int b = 0; b < RS_MAX_TRACKS && m->keep[a][i]; b++) {
+                const rs_track_t *tb = &m->tracks[b];
+                if (b == a || !tb->active || tb->amp_n < 5 || amp >= RS_LEAK_AMP * tb->amp_typ) continue;
+                if (pair_evidence(ta, pa, t, tb, 0) > 0) m->keep[a][i] = 0;
+            }
+        }
+    }
+    for (int a = 0; a < RS_MAX_TRACKS; a++) {
+        rs_track_t *ta = &m->tracks[a];
+        if (!ta->active) continue;
+        for (int i = 0; i < ta->rx.npkts; i++) {
+            if (!m->keep[a][i]) continue;
+            float amp = ta->rx.pkts[i].pkt.amplitude;
+            ta->amp_typ = ta->amp_n == 0 ? amp : 0.95f * ta->amp_typ + 0.05f * amp;
+            ta->amp_n++;
+        }
+    }
+    /* rows belong to the light that occupies them: a packet decoded by track A in its halo
+     * rows, outside A's own blob but inside another track's blob, is that other light's */
+    for (int a = 0; a < RS_MAX_TRACKS; a++) {
+        rs_track_t *ta = &m->tracks[a];
+        if (!ta->active) continue;
+        for (int i = 0; i < ta->rx.npkts; i++) {
+            float row = ta->rx.pkts[i].pkt.row_start + 0.5f * ta->rx.pkts[i].pkt.rows_per_chip * (float)RS_PKT_CHIPS;
+            if (in_rows(ta, row)) continue;
+            for (int b = 0; b < RS_MAX_TRACKS; b++) {
+                const rs_track_t *tb = &m->tracks[b];
+                if (b == a || !tb->active || tb->group == ta->group) continue;
+                if (in_rows(tb, row)) { m->keep[a][i] = 0; break; }
+            }
+        }
+    }
+    for (int a = 0; a < RS_MAX_TRACKS; a++) {
+        rs_track_t *ta = &m->tracks[a];
+        if (!ta->active) continue;
+        for (int b = a + 1; b < RS_MAX_TRACKS; b++) {
+            rs_track_t *tb = &m->tracks[b];
+            if (!tb->active) continue;
+            for (int i = 0; i < ta->rx.npkts; i++) {
+                const rs_rx_packet_t *pa = &ta->rx.pkts[i];
+                for (int j = 0; j < tb->rx.npkts; j++) {
+                    const rs_rx_packet_t *pb = &tb->rx.pkts[j];
+                    if (pa->pkt.id != pb->pkt.id || pa->pkt.seed != pb->pkt.seed || pa->pkt.payload != pb->pkt.payload) continue;
+                    float d = pa->pkt.row_start - pb->pkt.row_start; if (d < 0) d = -d;
+                    if (d > 2.0f * pa->pkt.rows_per_chip) continue;
+                    float row = pa->pkt.row_start;
+                    int in_a = row >= ta->r0 - 0.25f * (ta->r1 - ta->r0) && row <= ta->r1 + 0.25f * (ta->r1 - ta->r0);
+                    int in_b = row >= tb->r0 - 0.25f * (tb->r1 - tb->r0) && row <= tb->r1 + 0.25f * (tb->r1 - tb->r0);
+                    if (in_a && !in_b) m->keep[b][j] = 0;
+                    else if (in_b && !in_a) m->keep[a][i] = 0;
+                    /* both or neither: cannot tell, keep both (linked lights of one board are this case) */
+                }
+            }
+        }
+    }
+}
+
+static void remember_packets(rs_track_t *tr, float t) { remember_packets_impl(tr, t); }
 static void link_tracks(rs_multi_t *m, float t)
 {
-    /* every track remembers this frame's packets first; then, per pair, A-new vs B-all (same
+    /* packets were remembered before the cross-talk filter; per pair, A-new vs B-all (same
      * frame included) and B-new vs A-past, so each packet pair is counted once */
-    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) remember_packets(&m->tracks[k], t);
     for (int a = 0; a < RS_MAX_TRACKS; a++) {
         rs_track_t *ta = &m->tracks[a];
         if (!ta->active) continue;
@@ -247,11 +332,16 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         rs_track_t *tr = &m->tracks[k];
         tr->active = 1; tr->id = m->next_id++; tr->seen_frames = 0; tr->group = tr->id;
         tr->drop_clipped = 0; tr->last_packets = 0; tr->frames_since_eval = 0; tr->nrecent = 0; tr->recent_head = 0;
+        tr->amp_typ = 0; tr->amp_n = 0;
         for (int j = 0; j < RS_MAX_TRACKS; j++) { m->link[k][j] = m->link[j][k] = 0; m->linked[k][j] = m->linked[j][k] = 0; }
         rs_rx_init(&tr->rx);
+        tr->rx.defer_assembly = 1;
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;
     }
+    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) remember_packets(&m->tracks[k], t);
+    drop_crosstalk(m, t);
+    for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) rs_rx_assemble(&m->tracks[k].rx, m->keep[k]);
     link_tracks(m, t);
     int total = 0;
     for (int k = 0; k < RS_MAX_TRACKS; k++) if (m->tracks[k].active) total += m->tracks[k].packets_frame;

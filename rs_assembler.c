@@ -78,11 +78,23 @@ static int solve_from_raw(const rs_asm_slot_t *s, int skip, uint8_t data[RS_MSG_
     return rs_crc8(data, s->len) == s->msg_crc && rs_crc8b(data, s->len) == s->msg_crc2;
 }
 
+/* The message CRCs that have been received (one is enough to deliver a directly solved
+ * system: the packet CRCs already filter rows; both are required for the leave-one-out
+ * recovery, whose many trials would make a single CRC-8 unsafe). */
+static int msg_crc_ok(const rs_asm_slot_t *s, const uint8_t *data)
+{
+    if (!s->have_crc && !s->have_crc2) return 0;
+    if (s->have_crc && rs_crc8(data, s->len) != s->msg_crc) return 0;
+    if (s->have_crc2 && rs_crc8b(data, s->len) != s->msg_crc2) return 0;
+    return 1;
+}
+
 static int try_complete(rs_asm_t *a, rs_asm_slot_t *s, uint8_t id, rs_message_t *out)
 {
-    if (!s->have_meta || !s->have_crc || !s->have_crc2 || s->len == 0 || s->delivered || s->rank < s->len) return 0;
+    if (!s->have_meta || (!s->have_crc && !s->have_crc2) || s->len == 0 || s->delivered || s->rank < s->len) return 0;
     solve(s);
-    if (rs_crc8(s->data, s->len) != s->msg_crc || rs_crc8b(s->data, s->len) != s->msg_crc2) {
+    if (!msg_crc_ok(s, s->data)) {
+        if (!s->have_crc || !s->have_crc2) return 0;   /* wait for the second CRC before trying recoveries */
         /* A row that passed the packet CRC by chance poisoned the system. Find it:
          * re-solve from the raw rows leaving one out at a time (<= 56 small GF(2)
          * eliminations). If a leave-one-out solution satisfies both message CRCs,

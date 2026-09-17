@@ -32,6 +32,7 @@ typedef struct {
     float         rows_per_chip;
     uint32_t      frames, packets_total;
     uint32_t      grid_ok;          /* packets decoded at a predicted grid position (no sync) */
+    int           defer_assembly;   /* 1: rs_rx_process only decodes; rs_rx_assemble() feeds the assembler */
     rs_dec_stats_t last_stats;   /* of the last decoded channel */
     int           npkts;
     rs_rx_packet_t pkts[RS_RX_MAX_PKTS];
@@ -46,6 +47,9 @@ void rs_rx_init(rs_rx_t *rx);
  * Returns the number of packets decoded; complete messages are queued. */
 /* 1 when all three camera channels are modulated (an RGB LED), 0 for a single-colour light. */
 int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);
+/* With defer_assembly set: feed this frame's packets (pkts[i] with keep[i] != 0, or all when
+ * keep is NULL) to the assembler. Lets a multi-source receiver drop cross-talk first. */
+void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep);
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);
 
 /* Pop the next complete message; returns 0 when the queue is empty. */

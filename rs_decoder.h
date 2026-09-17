@@ -37,6 +37,7 @@ typedef struct {
     float   row_end;          /* row after the last chip */
     float   rows_per_chip;
     float   quality;          /* min bit confidence, 0..1 */
+    float   amplitude;        /* mean |ON - OFF| level over the bits (profile units): how bright the light was */
 } rs_packet_t;
 
 typedef struct {

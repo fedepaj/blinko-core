@@ -54,7 +54,7 @@ class DecCfg(ctypes.Structure):
 class Packet(ctypes.Structure):
     _fields_ = [("id", ctypes.c_uint8), ("seed", ctypes.c_uint16), ("payload", ctypes.c_uint8),
                 ("row_start", ctypes.c_float), ("row_end", ctypes.c_float),
-                ("rows_per_chip", ctypes.c_float), ("quality", ctypes.c_float)]
+                ("rows_per_chip", ctypes.c_float), ("quality", ctypes.c_float), ("amplitude", ctypes.c_float)]
 
 
 class Stats(ctypes.Structure):
