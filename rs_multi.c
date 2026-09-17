@@ -93,8 +93,13 @@ static void track_feed(rs_multi_t *m, rs_track_t *tr, const uint8_t *px, int w, 
      * RS_TRACK_REEVAL frames, or right after a frame in which the current variant decoded
      * nothing; in between the track keeps its choice. */
     static float a_r[RS_DEC_MAX_ROWS], a_g[RS_DEC_MAX_ROWS], a_b[RS_DEC_MAX_ROWS];
-    int reeval = (tr->seen_frames % RS_TRACK_REEVAL) == 1 || tr->last_packets == 0;
+    /* an empty frame also triggers a comparison, but not more often than every 3 frames:
+     * with several dim lights most frames of a track are empty and the comparison would
+     * run every frame (measured: 3 tracks took the iPhone from 93 to 55 fps) */
+    tr->frames_since_eval++;
+    int reeval = tr->frames_since_eval >= RS_TRACK_REEVAL || (tr->last_packets == 0 && tr->frames_since_eval >= 3);
     if (reeval) {
+        tr->frames_since_eval = 0;
         rs_frame_info_t ia;
         rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 0, a_r, a_g, a_b, &ia);
         rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 1, s_r, s_g, s_b, &info);
