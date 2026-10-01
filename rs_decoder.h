@@ -3,7 +3,8 @@
  * Input: a per-row brightness profile p[0..n-1] (row 0 = first exposed row).
  * Output: decoded packets with row positions and estimated rows-per-chip.
  * Self-calibrating: the chip length in rows is measured from each packet's
- * sync pattern, so no camera-specific configuration is required.
+ * sync pattern, so no camera-specific configuration is required; the exposure
+ * (rows) improves the detection when known. Protocol v3: RLL(2,7) chips, ML detection.
  */
 #ifndef RS_DECODER_H
 #define RS_DECODER_H
@@ -17,36 +18,34 @@ extern "C" {
 #define RS_DEC_MAX_ROWS 4096
 
 typedef struct {
-    float min_rows_per_chip;  /* default 2.5 */
-    float max_rows_per_chip;  /* default 48  */
-    float sync_tol;           /* max relative mismatch between sync runs, default 0.30 */
+    float min_rows_per_chip;  /* chip clocks searched, in rows per chip; default 1.2 */
+    float max_rows_per_chip;  /* default 30 */
+    float sync_tol;           /* tolerance of the sync's OFF runs against the clock, default 0.30 */
     float min_contrast;       /* min local (max-min) to trust a row, profile units, default 6 */
-    float pll_gain;           /* mid-bit edge phase correction, default 0.35 */
-    float min_quality;        /* reject packets whose weakest bit confidence < this, default 0.05 */
-    float rows_per_chip_hint; /* receiver's current estimate (0 = unknown); used by the edge path */
-    int   use_edges;          /* experimental rising-edge path for saturated signals (default 0: measured worse) */
-    int   timing_retries;     /* retry a failed packet with the receiver's chip clock and +-3 % (default 1) */
+    int   track_timing;       /* per-codeword +-1 row timing slips driving the survivor's clock PLL (default 1) */
+    float min_quality;        /* quality = 1/(1 + 30 mse per row of the normalized profile); default 0.4 */
+    float rows_per_chip_hint; /* receiver's confirmed clock (0 = unknown): narrows the scales, is the first hypothesis, budget 6 instead of 24 */
+    int   timing_retries;     /* clock hypotheses around the sync's: 1 = +-2.5 % (default), 2 = also +-5 %; 0 = the sync's only */
     int   grid_decode;        /* receiver: also decode at predicted grid positions next to decoded packets (default 1) */
+    float exposure_rows;      /* camera exposure in rows (exposure_us / row_us); 0 = unknown, half a chip is assumed */
 } rs_dec_cfg_t;
 
 typedef struct {
     uint8_t  id;              /* slot 0..7 */
-    uint16_t seed;            /* 0..509 data/coded, 510/511 META */
+    uint16_t seed;            /* < len systematic, len..123 coded, 124/125 message CRCs, 126/127 META */
     uint8_t  payload;
-    float   row_start;        /* first row of the packet (gap chip) */
-    float   row_end;          /* row after the last chip */
-    float   rows_per_chip;
-    float   quality;          /* min bit confidence, 0..1 */
-    float   amplitude;        /* mean |ON - OFF| level over the bits (profile units): how bright the light was */
+    float   row_start;        /* first row of the packet (gap chip), template coordinates */
+    float   row_end;          /* row after the last decoded cell */
+    float   rows_per_chip;    /* the detector's clock after its PLL */
+    float   quality;          /* template fit, 0..1 (see min_quality) */
+    float   amplitude;        /* local envelope amplitude over the sync (profile units): how bright the light was */
 } rs_packet_t;
 
 typedef struct {
-    int   syncs;              /* sync candidates found */
-    int   crc_ok;
-    int   crc_fail;
-    int   start_fail;
-    int   truncated;          /* sync found but packet ran past the last row */
-    int   retry_ok;           /* packets rescued by a timing hypothesis */
+    int   syncs;              /* sync candidates run through the detector */
+    int   crc_ok;             /* packets returned */
+    int   crc_fail;           /* detector runs that completed and failed the CRC (or the quality / rigid-grid check) */
+    int   truncated;          /* candidates whose packet did not fit the blob and could not be read cyclically or backward */
     float rows_per_chip;      /* mean over valid packets, 0 if none */
     float contrast;           /* global max-min of the profile */
 } rs_dec_stats_t;

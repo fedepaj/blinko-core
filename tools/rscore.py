@@ -6,7 +6,7 @@ CORE = ROOT
 BUILD = os.path.join(ROOT, "build")
 SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c", "rs_multi.c"]
 
-RS_PKT_CHIPS = 67
+RS_PKT_CHIPS = 82
 RS_NUM_SLOTS = 8
 RS_MSG_MAX_LEN = 31
 RS_SEED_META = 511
@@ -43,12 +43,14 @@ class Tx(ctypes.Structure):
                 ("cur", Slot), ("cur_id", ctypes.c_uint8), ("cur_sent", ctypes.c_uint8), ("visit_len", ctypes.c_uint8),
                 ("burst_on", ctypes.c_uint32), ("burst_off", ctypes.c_uint32), ("burst_pos", ctypes.c_uint32), ("in_pause", ctypes.c_uint8),
                 ("nchan", ctypes.c_uint8), ("pilot_period", ctypes.c_uint32), ("pilot_pos", ctypes.c_uint32), ("in_pilot", ctypes.c_uint8), ("pilot_idx", ctypes.c_uint32),
-                ("chips", (ctypes.c_uint8 * RS_PKT_CHIPS) * 3), ("chip_pos", ctypes.c_uint8 * 3), ("packets_sent", ctypes.c_uint32)]
+                ("chips", (ctypes.c_uint8 * RS_PKT_CHIPS) * 3), ("chip_pos", ctypes.c_uint8 * 3), ("packets_sent", ctypes.c_uint32),
+                ("repeat", ctypes.c_uint8), ("rep_left", ctypes.c_uint8 * 3)]
 
 
 class DecCfg(ctypes.Structure):
-    _fields_ = [(n, ctypes.c_float) for n in
-                ("min_rows_per_chip", "max_rows_per_chip", "sync_tol", "min_contrast", "pll_gain", "min_quality", "rows_per_chip_hint")] + [("use_edges", ctypes.c_int), ("timing_retries", ctypes.c_int), ("grid_decode", ctypes.c_int)]
+    _fields_ = [("min_rows_per_chip", ctypes.c_float), ("max_rows_per_chip", ctypes.c_float), ("sync_tol", ctypes.c_float), ("min_contrast", ctypes.c_float),
+                ("track_timing", ctypes.c_int), ("min_quality", ctypes.c_float), ("rows_per_chip_hint", ctypes.c_float),
+                ("timing_retries", ctypes.c_int), ("grid_decode", ctypes.c_int), ("exposure_rows", ctypes.c_float)]
 
 
 class Packet(ctypes.Structure):
@@ -59,7 +61,7 @@ class Packet(ctypes.Structure):
 
 class Stats(ctypes.Structure):
     _fields_ = [("syncs", ctypes.c_int), ("crc_ok", ctypes.c_int), ("crc_fail", ctypes.c_int),
-                ("start_fail", ctypes.c_int), ("truncated", ctypes.c_int), ("retry_ok", ctypes.c_int),
+                ("truncated", ctypes.c_int),
                 ("rows_per_chip", ctypes.c_float), ("contrast", ctypes.c_float)]
 
 
@@ -83,7 +85,7 @@ class Message(ctypes.Structure):
                 ("text", ctypes.c_char * RS_TEXT_MAX)]
 
 
-_lib = ctypes.CDLL(_build())
+_lib = ctypes.CDLL(os.environ.get("RS_LIB") or _build())   # RS_LIB: a cached build, for A/B comparisons
 _lib.rs_tx_init.argtypes = [ctypes.POINTER(Tx)]
 _lib.rs_tx_log.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8, ctypes.c_char_p, ctypes.c_size_t]
 _lib.rs_tx_log.restype = ctypes.c_uint8
@@ -91,6 +93,7 @@ _lib.rs_tx_set_slot.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8, ctypes.c_uin
 _lib.rs_tx_next_packet.argtypes = [ctypes.POINTER(Tx), ctypes.POINTER(ctypes.c_uint8), ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint8)]
 _lib.rs_tx_set_burst.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint32, ctypes.c_uint32]
 _lib.rs_tx_set_channels.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8, ctypes.c_uint32]
+_lib.rs_tx_set_repeat.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8]
 _lib.rs_tx_next_chips.argtypes = [ctypes.POINTER(Tx), ctypes.POINTER(ctypes.c_uint8)]
 _lib.rs_rx_sizeof.restype = ctypes.c_size_t
 _lib.rs_rx_init.argtypes = [ctypes.c_void_p]
@@ -127,19 +130,29 @@ def crc8(data: bytes) -> int:
     return crc
 
 
+def crc12(v: int, nbits: int) -> int:
+    """CRC-12 (poly 0x80F, init 0xFFF) over the nbits low bits of v, as rs_crc12_bits."""
+    crc = 0xFFF
+    for i in range(nbits - 1, -1, -1):
+        inb = ((v >> i) & 1) ^ ((crc >> 11) & 1)
+        crc = (crc << 1) & 0xFFF
+        if inb: crc ^= 0x80F
+    return crc
+
+
 def crc_fields(id_: int, seed: int, payload: int) -> int:
-    v = ((id_ & 7) << 17) | ((seed & 511) << 8) | payload
-    return crc8(bytes([(v >> 12) & 0xFF, (v >> 4) & 0xFF, (v & 0xF) << 4]))
+    return crc12(((id_ & 7) << 15) | ((seed & 127) << 8) | (payload & 255), 18)
+
+
+_lib.rs_tx_encode.argtypes = [ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint8, ctypes.POINTER(ctypes.c_uint8)]
+_lib.rs_tx_encode.restype = ctypes.c_int
 
 
 def encode_packet(id_: int, seed: int, payload: int) -> list:
-    """Pure-Python mirror of rs_encode_packet v2 (for cross-checking)."""
-    bits = ((id_ & 7) << 25) | ((seed & 511) << 16) | (payload << 8) | crc_fields(id_, seed, payload)
-    chips = [0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0]
-    for i in range(27, -1, -1):
-        bit = (bits >> i) & 1
-        chips += [0, 1] if bit else [1, 0]
-    return chips
+    """Chips of one v3 packet, from the C encoder (RLL(2,7), sync, CRC-12)."""
+    buf = (ctypes.c_uint8 * RS_PKT_CHIPS)()
+    n = _lib.rs_tx_encode(id_, seed, payload, buf)
+    return list(buf[:n])
 
 
 def pack6(text: str) -> bytes:
@@ -179,6 +192,7 @@ class Transmitter:
     def set_burst(self, on_chips: int, off_chips: int):
         _lib.rs_tx_set_burst(ctypes.byref(self.tx), on_chips, off_chips)
 
+    def set_repeat(self, n: int): _lib.rs_tx_set_repeat(ctypes.byref(self.tx), n)
     def set_channels(self, nchan: int, pilot_period: int):
         _lib.rs_tx_set_channels(ctypes.byref(self.tx), nchan, pilot_period)
 

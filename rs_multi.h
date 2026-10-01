@@ -42,12 +42,15 @@ typedef struct {
     float link[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* pair evidence: identical data packets in the same frame, decayed */
     unsigned char linked[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* current link state (hysteresis) */
     unsigned char keep[RS_MAX_TRACKS][RS_RX_MAX_PKTS];    /* per-frame cross-talk mask */
+    float exposure_rows;       /* camera exposure in rows, pushed into every track's decoder (0 = unknown) */
     int next_id;
     int nblobs;                /* blobs found in the last frame */
     rs_blob_t blobs[RS_MAX_BLOBS];
 } rs_multi_t;
 
 void rs_multi_init(rs_multi_t *m);
+/* Camera exposure in rows (exposure_us / row_us) for the exposure-aware detector; 0 = unknown. */
+void rs_multi_set_exposure_rows(rs_multi_t *m, float rows);
 
 /* Process one interleaved RGB(A) frame. Returns the total packets decoded. */
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,

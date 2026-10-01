@@ -45,19 +45,28 @@ def sweep(quick=False):
     rows = 1080
     dec = Decoder()
     rng = np.random.default_rng(42)
-    print(f"{'rpc':>5} {'exp':>5} {'noise':>5} {'blob':>5} | {'frames':>6} {'pkts':>5} {'wrong':>5} {'pkt/frame':>9} {'crcfail':>7}")
+    print(f"{'rpc':>5} {'exp':>5} {'noise':>5} {'blob':>5} {'rows':>5} | {'frames':>6} {'pkts':>5} {'wrong':>5} {'pkt/frame':>9} {'crcfail':>7}")
     worst = 0
+    # (rows per cell, exposure in cells, noise, blob fraction, profile rows): phone-like conditions
+    # 1080p phones (iPhone 14: 5.1 us rows, 15 us exposure -> 0.75 cells at T=60) and a RAW
+    # 4000x3000 Android sensor (S21 FE: 2.65 us rows, 57 us exposure -> 1.3..2 cells at T=120..90)
     cases = []
-    for rpc in ([4, 8, 16] if quick else [3, 4, 5, 6, 8, 12, 16, 24, 32, 40]):
-        for exp_frac in [0.3, 0.6, 1.0]:
+    for rpc in ([4, 6] if quick else [3, 4, 5, 6]):
+        for exp_frac in ([0.6, 1.0] if quick else [0.3, 0.6, 1.0]):
             for noise in [1.0, 3.0]:
-                cases.append((rpc, exp_frac, noise, 0.6))
-    cases += [(8, 0.5, 2.0, 0.15), (8, 0.5, 2.0, 0.3), (8, 0.5, 6.0, 0.6), (4, 0.5, 4.0, 0.6)]
+                cases.append((rpc, exp_frac, noise, 0.6, 1080))
+    for rpc in ([11, 15] if quick else [8, 11, 15]):
+        for exp_frac in ([1.4, 1.9] if quick else [1.0, 1.4, 1.9]):
+            cases.append((rpc, exp_frac, 2.0, 0.55, 3000))
+    cases += [(3.7, 1.9, 2.0, 0.3, 1080), (3.7, 2.8, 2.0, 0.3, 1080)]            # S21 FE 1080p YUV: short blob, long exposure
+    cases += [(8, 0.5, 2.0, 0.15, 1080), (8, 0.5, 2.0, 0.3, 1080), (8, 0.5, 6.0, 0.6, 1080), (4, 0.5, 4.0, 0.6, 1080)]
+    rep_cases = [(15, 1.4, 2.0, 0.55, 3000), (11, 1.9, 2.0, 0.55, 3000), (3.7, 1.9, 2.0, 0.3, 1080), (6, 0.6, 2.0, 0.6, 1080)]   # packets repeated twice
     sat_cases = [(6, 0.5, 2.0, 0.6, 900.0), (6, 1.0, 2.0, 0.6, 2500.0), (4, 0.8, 2.0, 0.6, 1200.0)]   # saturating LED (amplitude >> 255)
     total_wrong = 0
-    for rpc, exp_frac, noise, blob_frac in cases:
+    for rpc, exp_frac, noise, blob_frac, rows in cases:
         n_frames = 40 if quick else 120
         good = wrong = crcfail = 0
+        dec.cfg.exposure_rows = exp_frac * rpc                 # the apps pass the camera's exposure
         for _ in range(n_frames):
             off = rng.uniform(0, RS_PKT_CHIPS)
             b0 = rng.uniform(0.05, 0.95 - blob_frac)
@@ -69,10 +78,29 @@ def sweep(quick=False):
                 if matches_truth(pk, rpc, off, packets): good += 1
                 else: wrong += 1
         total_wrong += wrong
-        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}")
+        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} {rows:5} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}")
+    # the firmware replays the same chips `repeat` times (rs_tx_set_repeat): same stream, each packet twice
+    packets2 = [t for t in packets for _ in range(2)]
+    chips2 = np.concatenate([np.array(encode_packet(*t), dtype=np.float32) for t in packets2])
+    for rpc, exp_frac, noise, blob_frac, rows in rep_cases:
+        n_frames = 40 if quick else 120
+        good = wrong = crcfail = 0
+        dec.cfg.exposure_rows = exp_frac * rpc
+        for _ in range(n_frames):
+            off = rng.uniform(0, RS_PKT_CHIPS)
+            b0 = rng.uniform(0.05, 0.95 - blob_frac)
+            p = rolling_shutter_profile(chips2, rows, rpc, exp_frac, off, blob=(b0, b0 + blob_frac), noise=noise, rng=rng)
+            pkts = dec.decode(p); crcfail += dec.stats.crc_fail
+            for pk in pkts:
+                if matches_truth(pk, rpc, off, packets2): good += 1
+                else: wrong += 1
+        total_wrong += wrong
+        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} {rows:5} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}   repeat 2")
+    rows = 1080
     for rpc, exp_frac, noise, blob_frac, amp in sat_cases:
         n_frames = 40 if quick else 120
         good = wrong = crcfail = 0
+        dec.cfg.exposure_rows = exp_frac * rpc
         for _ in range(n_frames):
             off = rng.uniform(0, RS_PKT_CHIPS)
             b0 = rng.uniform(0.05, 0.95 - blob_frac)
@@ -82,7 +110,7 @@ def sweep(quick=False):
                 if matches_truth(pk, rpc, off, packets): good += 1
                 else: wrong += 1
         total_wrong += wrong
-        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}   saturating (amplitude {amp:.0f})")
+        print(f"{rpc:5} {exp_frac:5.2f} {noise:5.1f} {blob_frac:5.2f} {rows:5} | {n_frames:6} {good:5} {wrong:5} {good/n_frames:9.2f} {crcfail:7}   saturating (amplitude {amp:.0f})")
     print("total wrong packets:", total_wrong)
     return total_wrong
 
@@ -166,8 +194,8 @@ def rgb_test():
     gains = np.array([110.0, 140.0, 90.0])
     rng = np.random.default_rng(11)
     rx = Receiver(); rpc = 6.0; frames = 0; got = {}; t = 0.0
-    for f in range(400):
-        off = rng.uniform(0, chips.shape[1] / rpc - 1200) * rpc / rpc  # offset in chips
+    for f in range(600):                  # the 1.8 s stream limits how fast the carousel completes, not the decoder
+        off = rng.uniform(0, chips.shape[1] / rpc - 1200)  # offset in chips
         p = np.stack([rolling_shutter_profile(chips[c], 1080, rpc, 0.5, off, blob=(0.15, 0.85), amplitude=1.0, ambient=0.0, noise=0.0, quantize=False, rng=rng) for c in range(3)])
         obs = (M @ (p * gains[:, None])) + 10.0 + rng.normal(0, 2.0, p.shape)
         obs = np.clip(obs, 0, 255)

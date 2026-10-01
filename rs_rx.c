@@ -56,15 +56,21 @@ static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int
 static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
 {
     rs_packet_t out[32];
-    rx->cfg.rows_per_chip_hint = rx->rows_per_chip;
+    rx->cfg.rows_per_chip_hint = rx->rpc_n >= 3 ? rx->rows_per_chip : 0;   /* a single false accept must not lock the clock */
+    /* the hint narrows the sync search; it is kept only while packets keep coming (the board's
+     * chip length can change), so empty frames erode it and after a few the full search is back */
     int k = rs_decode_profile(p, n, &rx->cfg, out, 32, &rx->last_stats);
+    if (k == 0) { if (++rx->empty_frames >= 30) { rx->rpc_n = 0; rx->empty_frames = 0; } } else rx->empty_frames = 0;   /* a stale clock (chip changed) is released after 30 empty frames, not on every one */
     k = grid_decode(rx, p, n, out, k, 32);
     for (int i = 0; i < k && rx->npkts < RS_RX_MAX_PKTS; i++) {
         rx->pkts[rx->npkts].pkt = out[i];
         rx->pkts[rx->npkts].channel = channel;
         rx->npkts++;
         rx->packets_total++;
-        rx->rows_per_chip = rx->rows_per_chip == 0 ? out[i].rows_per_chip : 0.9f * rx->rows_per_chip + 0.1f * out[i].rows_per_chip;
+        if (rx->rows_per_chip == 0) { rx->rows_per_chip = out[i].rows_per_chip; rx->rpc_n = 1; }
+        else if (out[i].rows_per_chip > 0.85f * rx->rows_per_chip && out[i].rows_per_chip < 1.15f * rx->rows_per_chip) {
+            rx->rows_per_chip = 0.9f * rx->rows_per_chip + 0.1f * out[i].rows_per_chip; if (rx->rpc_n < 1000) rx->rpc_n++;
+        } else if (--rx->rpc_n <= 0) { rx->rows_per_chip = out[i].rows_per_chip; rx->rpc_n = 1; }   /* the clock changed (chip setting) or the first one was false */
         if (rx->defer_assembly) continue;
         rs_message_t m;
         if (rs_asm_feed(&rx->assembler, &out[i], &m)) push_msg(rx, &m);

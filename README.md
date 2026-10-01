@@ -31,12 +31,12 @@ There is no build step for the C code: add the `rs_*.c` files to your project
 
 ## Minimal use
 
-Transmitter — one chip per timer tick, one bit per two chips:
+Transmitter — one chip per timer tick, the timer at T/3 (`cfg.chip_us / RS_CELLS_PER_T`):
 
 ```c
 rs_tx_t tx; rs_tx_init(&tx);
 rs_tx_log(&tx, RS_LVL_INFO, "boot ok", 7);
-/* in the timer ISR, every T_chip: */
+/* in the timer ISR, every chip: */
 uint8_t chips[RS_MAX_CHANNELS];
 rs_tx_next_chips(&tx, chips);        /* chip 1 = LED on, one value per channel */
 ```
@@ -60,4 +60,6 @@ while (rs_rx_pop_message(&rx, &m)) printf("[%u] %s\n", m.level, m.text);
 | `replay.py` | run a `.rsrec` recording through the C receiver exactly as the app does |
 | `decode_image.py` | decode packets from a still photo or a video frame |
 | `loss_budget.py` | where packets are lost: decoded / rescuable / damaged |
+| `codelab.py` | line-code bench (Manchester, Miller, RLL(2,7), NRZ, 4B6B, 8B10B, PPM) with an exposure-aware Viterbi, on the simulator |
+| `v3lab.py` | Python reference of the v3 detector, for experiments on saved profiles |
 | `rscore.py`, `rsrec.py` | ctypes wrapper around the C core, `.rsrec` reader |

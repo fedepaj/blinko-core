@@ -1,38 +1,73 @@
-# Blinko — Optical protocol (v2)
+# Blinko — Optical protocol (v3)
+
+The wire format and the receiver pipeline, in enough detail to write another
+implementation. Design rationale and the history of the protocol live in the
+source comments (`rs_proto.h`, `rs_decoder.c`); measurements are in
+`docs/FINDINGS.md` of the umbrella repository.
 
 ## Physical layer
 
-- **Modulation**: OOK (LED on/off). Time unit: the **chip**, of duration
-  `T_chip` (default 30 µs). The chip is the only timing constant: the
-  receiver recovers it, in rows, from the sync of every packet.
-- **Data coding**: Manchester. `bit 1 = chip 0 then 1` (rising edge at
-  mid-bit), `bit 0 = chip 1 then 0`. Data therefore contains only runs of 1
-  or 2 chips.
+- **Modulation**: OOK (LED on/off). Time unit: the **chip** (one code cell,
+  the transmitter's timer period). The constant a board is configured with is
+  **T = 3 chips** (`RS_CELLS_PER_T`), the shortest run the line code produces:
+  T is what the camera exposure must stay below. Default T = 60 µs, so the
+  timer runs at 20 µs. The receiver recovers the chip clock, in rows, from the
+  sync of every packet.
+- **Line code**: RLL(2,7) in NRZI. Transitions are between 3 and 8 chips
+  apart; the code carries 1.5 bits per T. It is the variable-length table code
+  of the hard-disk literature, driven bit by bit
+  (`rs_rll27_step` in `rs_proto.h`):
+
+  | bits | code (chips, transition = 1) |
+  |---|---|
+  | `10` | `0100` |
+  | `11` | `1000` |
+  | `000` | `000100` |
+  | `010` | `100100` |
+  | `011` | `001000` |
+  | `0010` | `00100100` |
+  | `0011` | `00001000` |
+
+  A `1` in the code toggles the LED level; the encoder starts from OFF after
+  the sync. Only runs of 3..8 chips exist in data, so a run of 10 chips cannot
+  occur and is the sync.
 - **Byte order**: MSB first.
-- **Polarity**: chip `1` = LED on.
+- **Polarity**: LED on = high level.
 
 ## Packet
 
-Every packet has the same length: **67 chips** (2.0 ms @ 30 µs).
+Every packet has the same length: **82 chips** (3.3 ms at T = 60 µs, 1.6 ms at
+T = 30 µs).
 
 ```
- gap  sync                 start   id (3 bit) seed (9 bit)  payload (8 bit)  CRC8 (8 bit)
- [0]  [1 1 1 1][0 0 0 0]   [1 0]   6 chip     18 chip       16 chip          16 chip     = 67
+ gap     sync ON    off     data field (66 chips)
+ [0 0 0] [1 × 10]   [0 0 0] RLL(2,7) of 30 bits: id(3) seed(7) payload(8) crc12(12), flush, filler
 ```
 
-- **gap** `0` and **start** `10` delimit the sync (runs of exactly 4+4 chips,
-  impossible in Manchester data): three edges at a known distance → an
-  estimate of `T_chip` in rows for every packet.
+- **sync** `[OFF 3][ON 10][OFF 3]`: the ON run is a run-length violation of
+  the code, its two edges 10 chips apart give the chip clock, and the OFF runs
+  on both sides are the shortest the code allows, so the sync is also a legal
+  neighbour of the data around it.
+- **data field**: the 30 bits encoded from level OFF; the code tree is flushed
+  with zero bits (≤ 3) and the field is **filled to 66 chips with runs of 4**,
+  so every packet has the same length, packets sit on a grid, and a bright
+  chip always lies within 5 chips before the next gap (the receiver uses this
+  to tell a gap from the dark surroundings of the blob).
 - **id** 0..7: message slot. 0..5 rotating logs, 6 = STATUS, 7 = FAULT.
-- **seed** 0..511:
-  - 511 = META: payload `[len:5][level:3]`, message bytes stored raw;
-  - 510 = META: same, but the bytes are 6-bit packed text;
-  - 509, 508 = CRC-8/ATM and CRC-8/MAXIM of the whole message (16 guard bits);
+- **seed** 0..127:
+  - 127 = META: payload `[len:5][level:3]`, message bytes stored raw;
+  - 126 = META: same, but the bytes are 6-bit packed text;
+  - 125, 124 = CRC-8/ATM and CRC-8/MAXIM of the whole message (16 guard bits);
   - `seed < len`: systematic packet, payload = message byte `seed`;
-  - `len ≤ seed ≤ 507`: **coded** packet, payload = XOR of the bytes selected
+  - `len ≤ seed ≤ 123`: **coded** packet, payload = XOR of the bytes selected
     by `rs_code_mask(seed, len)` (xorshift32, identical on every platform).
-- **CRC8** (poly 0x07, init 0x00) over the 20 id+seed+payload bits (3 bytes,
-  last nibble zero).
+- **CRC-12** (poly 0x80F, init 0xFFF) over the 18 id+seed+payload bits. The
+  non-zero init means an all-dark or all-bright stretch never decodes to a
+  valid packet.
+- **Repetition** (`rs_tx_set_repeat`, 1..4): every packet can be sent n times
+  back to back. A camera whose readout window is shorter than a packet (a 30 fps
+  Android phone sees ~4 ms of each frame) reads one packet across two copies;
+  see cyclic decoding below. Default 1.
 
 Levels: 0 DEBUG, 1 INFO, 2 WARN, 3 ERROR, 4 FATAL, 5 STATUS, 6 FAULT.
 
@@ -76,7 +111,7 @@ two seconds while the last log lines still follow it.
 With an RGB LED the transmitter sends **three independent streams** (R, G, B),
 taking packets from the carousel in turn: three packets per packet interval,
 synchronised (their syncs coincide). Every `pilot_ms` (default 30 ms, i.e.
-1000 chips) a **pilot block** of 9·P chips is emitted at a packet boundary
+1500 chips at T = 60 µs) a **pilot block** of 9·P chips is emitted at a packet boundary
 (P = `RS_PILOT_P` = 4, so 36 chips ≈ 3.6 % overhead):
 `[dark 2P][R P][dark P][G P][dark P][B P][dark 2P]`.
 
@@ -145,48 +180,95 @@ and every channel range at least 30 % of the largest.
 
 ### Packet decoding (`rs_decode_profile`)
 
-Per profile, at candidate scales 3, 6, 12, 24 and 44 rows/chip (each accepting
-[0.45×, 2.2×]; once the receiver knows its chip clock only the covering scales
-are searched — 1–2 passes instead of 5):
+The decoder is an exposure-aware maximum-likelihood detector: it does not
+threshold the profile into chips, it fits chip templates that include the
+camera's exposure smear to the analogue profile. One row integrates the LED
+over the exposure window E, so a step becomes a ramp E rows long and a 3-chip
+run at E = T has only 64 % of its amplitude; the templates reproduce that, so
+the detector works up to E ≈ 2–3 T where a threshold decoder stops at E ≈ T.
+The app passes the exposure in rows (`exposure_rows = exposure_µs / row_µs`);
+half a chip is assumed when unknown, and 1.4× and 2× the given value are also
+tried because phones report less exposure than their edges show.
 
-1. **Envelope**: sliding min/max over a window of 9 chips; a row whose local
-   contrast is below `min_contrast` (6) is marked unknown.
-2. **Binarize** at the local envelope midpoint, then run-length encode.
-3. **Sync**: a low(gap) / high `L1` / low `L2` / high `L3` sequence with
-   `L1 ≈ L2` (within `sync_tol` = 0.30), `L3` between 0.35 and 1.9 chips, and
-   `rows_per_chip = (L1+L2)/8` inside the scale's range. The three edges are
-   refined to sub-row precision by linear interpolation of the threshold
-   crossing; `rpc_ref = (t2−t0)/8` must agree with `(t1−t0)/4`.
-4. **Bits**: for each of the 29 bits (start + 28) the integrals of the first
-   and second half of the bit are compared on the analogue profile; the
-   confidence is their normalised difference, and the mid-bit edge re-locks the
-   phase (PLL, gain 0.35).
-5. **Checks**: start bit = 0, header CRC-8, and worst-bit confidence ≥
-   `min_quality` (0.05). The packet also carries its mean |ON−OFF| amplitude,
-   used later by the cross-talk filter.
-6. **Timing hypotheses**: the 8-chip sync alone fixes the chip length to only
-   ~2 %, which is 1.4 chips of drift by the end of a packet when the PLL loses
-   its edges (saturated or noisy rows). On a failed CRC the packet is retried
-   with the receiver's own chip clock (an EMA over many packets and frames) and
-   with the sync estimate stretched by ±3 %. A rescued packet must decode at
-   twice the minimum confidence, since CRC-8 alone would let ~1/256 of the
-   corrupted syncs through per hypothesis.
-7. Decoding continues after the packet (several packets per frame when the
-   blob is tall); results from different scales are deduplicated (keeping the
-   higher quality) and sorted by row.
+Per profile:
 
-An experimental **edge path** for heavily saturated signals (rising-edge
-positions only) is in `rs_decoder.c` but is off by default: measured worse
-than the classic path on the corpus and in simulation.
+1. **Candidates, at every plausible scale** (2, 3.5, 6, 10, 17, 28 rows per
+   chip; with a confirmed clock only the covering scale). The profile is
+   envelope-normalized for the scale (sliding min/max over 15 chips: the blob
+   changes brightness several-fold along a packet) and two sync finders run:
+   the **binarized runs** (OFF/ON/OFF with the ON run near 10 chips, every data
+   run after it 3..8 chips) and a **correlation** with the exposure-smeared sync
+   template at 0.7×..1.3× of the scale, which survives the chatter of
+   half-height pulses that breaks the runs. Candidates are ranked globally
+   across scales, best correlation first.
+2. **Validation**, without spending a detector run. The sync template is
+   placed precisely (±8 % clock, ±0.3 chip); then the ON run is measured between
+   its two 0.5-crossings: it must be 10 chips ± 15 % and both edges must exist
+   (the blob's own bright edge, which the correlation likes because the gap
+   before it is dark too, fails this), and **its length is the clock estimate**
+   (two edges 10 chips apart give ~1 %; a correlation grid cannot). The 5 chips
+   before the gap must contain a bright chip (a real gap follows modulated
+   signal). Candidates whose exposure exceeds 3 chips are dropped: the
+   templates are flat and fit anything.
+3. **Detection**: a Viterbi search over the 12 states of the RLL(2,7) encoder
+   (tree node × level). For each survivor and input bit the codeword's chip
+   template is built at the survivor's position and clock, with the exposure
+   smear and the survivor's last 8 chips as history, and compared to the
+   profile at ±1 row of **timing slip**; the slip also corrects the survivor's
+   own clock (a first-order PLL, gain 0.3·slip/cells, clamped ±6 %), so a clock
+   hypothesis a few percent off converges instead of drifting out of the slip
+   range. Metric: squared error per row. Early abort at codewords 5, 9 and 17
+   when the best survivor's error is already above what the quality threshold
+   allows. At ≥ 6 rows per chip the template is evaluated once per `rpc/4`
+   rows against the profile's mean over those rows.
+4. **Clock hypotheses**, tried until one passes: the receiver's confirmed
+   clock, the sync's, ±2.5 % (±5 % with E > 2 chips).
+5. **Checks**: CRC-12; **quality** = 1 / (1 + 30 · mse per row) ≥
+   `min_quality` (0.4; true packets score 0.6–0.95); and a **rigid-grid
+   re-fit** of the decoded chips with one clock = (end − start)/cells and a
+   global phase of ±2 rows must not be more than 3× worse than the slipped fit
+   (the slips can otherwise fit the stream at 2/3 of its clock, and such an
+   alias can pass the CRC).
+6. **Framing beyond the sync.** The usable end of the signal is where the
+   local amplitude falls below 60 % of the sync's (the blob's soft edge: the
+   envelope normalization lags a fade shorter than its window, so rows with
+   some contrast left are still garbage). When the packet after the sync runs
+   past it:
+   - **cyclic decode**: the tail is read one packet period earlier, before this
+     sync, where the previous copy of a repeated packet lies; the seam sits half
+     a normalization window before the fade, the wrapped rows must carry signal,
+     and period offsets 0, ±2, ±4 rows are tried (the period is only known to
+     the clock's precision), stopping at a valid CRC;
+   - **backward decode**: the packet *before* the sync is decoded — its data
+     field ends where this gap begins and takes clock and phase from this sync.
+     This is done for every trusted sync (its own packet decoded, or did not
+     fit), so every complete data field in the blob is read from the nearest
+     sync, its own or the next one, and a blob one packet long yields a packet
+     wherever the sync fell.
+7. Results from different candidates are deduplicated by row (keeping the
+   higher quality) and sorted. The budget is 24 detector runs per profile while
+   the receiver has no confirmed clock, 6 once it has one; a candidate costs one
+   run forward and one backward.
+
+The receiver (`rs_rx`) confirms its clock after 3 concordant packets (EMA
+0.1), passes it as `rows_per_chip_hint`, and drops it after 30 consecutive
+empty frames so that a chip-length change on the board is picked up.
+
+Cost: about 2 ms per 1080-row profile at 4 rows per chip and 4–8 ms per
+3000-row RAW profile on an M-series Mac, 2–4× that on a phone.
+
+Debugging: build the core with `-DRS_DEC_DEBUG` (`RS_CFLAGS=-DRS_DEC_DEBUG` for
+the Python tools) to trace candidates and hypotheses on stderr and read the
+timing counters (`rs_decode_debug_counters`); `RS_LIB=<cached dylib>` runs the
+Python tools against an older core build for A/B comparisons.
 
 ### Grid decode
 
 The transmitter sends packets back to back, so from one decoded packet the
 others in the frame sit exactly `RS_PKT_CHIPS` apart. `rs_rx` therefore calls
-`rs_decode_at` (no sync search: bit decisions, PLL, start bit, CRC — the row
-given is the gap chip) at up to 4 predicted positions each side of every
-decoded packet, trying three sub-chip offsets (0, ±0.3 chip) and demanding
-twice the minimum confidence. A packet whose sync was destroyed by clipping or
+`rs_decode_at` (no sync search: the detector at the given clock, the row given
+is the gap chip) at up to 4 predicted positions each side of every decoded
+packet, trying three sub-chip offsets (0, ±0.3 chip). A packet whose sync was destroyed by clipping or
 smear can still be read this way, because the bits survive longer than the
 sync. The first failure in a direction stops that direction: a pilot block or a
 burst pause has broken the grid there.
@@ -258,14 +340,15 @@ Text generated by the firmware, e.g.
 `WDT reset` (watchdog reset), `FATAL 12: sensor init` (from `Blinko.fatal`).
 The reset cause (`RSTSR0/1/2`) is included in the STATUS at every boot.
 
-## Recommended parameters (to be confirmed by calibration)
+## Recommended parameters
 
 | Parameter | Value |
 |---|---|
-| `T_chip` | 30 µs (16.6 kbit/s gross per channel; measured on an iPhone 14, see CALIBRATION.md) |
-| phone exposure | the shortest available (≤ `T_chip`/2); iPhone 14: 15 µs at 120 fps |
-| rows per chip | ≥ 4 |
-| packet length | 67 chips = 2.0 ms |
-| channels | 3 (RGB), pilot every 30 ms (36 chips, 3.6 % overhead) |
+| T (`chip_us`) | 60 µs default (25 kbit/s gross per channel). 45 µs on an iPhone 14 (15 µs exposure); 90–120 µs with `repeat` 2–3 for a 57 µs-exposure Android phone (see CALIBRATION.md) |
+| phone exposure | the shortest available; it must stay ≤ T, the detector tolerates up to ~2 T with a penalty |
+| rows per chip | ≥ 1.2 for the detector; ≥ 3 for comfort |
+| packet length | 82 chips = 3.3 ms at T = 60 µs |
+| repetition | 1 when the blob is taller than a packet, 2–3 when it is not |
+| channels | 3 (RGB), pilot every 30 ms (36 chips) |
 | visible blink | 150 ms on / 50 ms off |
 | FAULT weight | 3 in the death loops |

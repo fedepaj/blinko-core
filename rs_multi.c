@@ -296,6 +296,12 @@ static void link_tracks(rs_multi_t *m, float t)
     }
 }
 
+void rs_multi_set_exposure_rows(rs_multi_t *m, float rows)
+{
+    m->exposure_rows = rows;
+    for (int i = 0; i < RS_MAX_TRACKS; i++) m->tracks[i].rx.cfg.exposure_rows = rows;
+}
+
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                      int r_off, int g_off, int b_off, float t)
 {
@@ -335,6 +341,7 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         tr->amp_typ = 0; tr->amp_n = 0;
         for (int j = 0; j < RS_MAX_TRACKS; j++) { m->link[k][j] = m->link[j][k] = 0; m->linked[k][j] = m->linked[j][k] = 0; }
         rs_rx_init(&tr->rx);
+        tr->rx.cfg.exposure_rows = m->exposure_rows;
         tr->rx.defer_assembly = 1;
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;

@@ -30,6 +30,8 @@ typedef struct {
     float         last_pilot_t;
     int           mode;      /* 0 = luma, 1 = rgb (calibrated) */
     float         rows_per_chip;
+    int           rpc_n;            /* packets that agreed with rows_per_chip; the decoder gets the hint from 3 on */
+    int           empty_frames;     /* consecutive frames without a packet; the hint is dropped after 30 */
     uint32_t      frames, packets_total;
     uint32_t      grid_ok;          /* packets decoded at a predicted grid position (no sync) */
     int           defer_assembly;   /* 1: rs_rx_process only decodes; rs_rx_assemble() feeds the assembler */
