@@ -23,6 +23,11 @@ typedef struct {
     uint8_t channel;         /* 0..2, or 0 in luma mode */
 } rs_rx_packet_t;
 
+/* Platform hook to decode the three channels of a frame at once: call job(ctx, i) for
+ * i = 0..count-1 on separate threads and return when all are done (the core itself has no
+ * threads; the decoder must be built with RS_DEC_THREADS so that its scratch is per thread). */
+typedef void (*rs_parallel_fn)(void *user, int count, void (*job)(void *ctx, int i), void *ctx);
+
 typedef struct {
     rs_dec_cfg_t  cfg;
     rs_asm_t      assembler;
@@ -36,6 +41,8 @@ typedef struct {
     uint32_t      grid_ok;          /* packets decoded at a predicted grid position (no sync) */
     int           defer_assembly;   /* 1: rs_rx_process only decodes; rs_rx_assemble() feeds the assembler */
     rs_dec_stats_t last_stats;   /* of the last decoded channel */
+    rs_parallel_fn parallel;     /* optional: decodes the channels of a frame in parallel (see rs_parallel_fn) */
+    void          *parallel_user;
     int           npkts;
     rs_rx_packet_t pkts[RS_RX_MAX_PKTS];
     rs_message_t  queue[RS_RX_QUEUE];
@@ -51,6 +58,8 @@ void rs_rx_init(rs_rx_t *rx);
 int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);
 /* With defer_assembly set: feed this frame's packets (pkts[i] with keep[i] != 0, or all when
  * keep is NULL) to the assembler. Lets a multi-source receiver drop cross-talk first. */
+/* Install the platform's parallel hook (see rs_parallel_fn); NULL decodes the channels in turn. */
+void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user);
 void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep);
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);
 

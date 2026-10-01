@@ -46,19 +46,29 @@
  */
 #include "rs_decoder.h"
 
+/* The decoder keeps its scratch (about 150 KB) in file-scope buffers: no allocation, and one
+ * decode at a time per thread. With RS_DEC_THREADS defined they become thread-local, so the
+ * receiver's channels can be decoded on several threads at once (rs_rx_t.parallel); each thread
+ * that decodes then owns a copy. Platforms without threads leave it undefined. */
+#ifdef RS_DEC_THREADS
+#define RS_TLS __thread
+#else
+#define RS_TLS
+#endif
+
 typedef struct { uint8_t level; int start; int len; } rs_run_t;
 
-static float    s_norm[RS_DEC_MAX_ROWS];      /* envelope-normalized profile, 0..1 */
-static float    s_amp[RS_DEC_MAX_ROWS];       /* local amplitude (envelope max - min) */
-static float    s_emin[RS_DEC_MAX_ROWS], s_emax[RS_DEC_MAX_ROWS];
-static uint8_t  s_bin[RS_DEC_MAX_ROWS];       /* 0/1, 2 = too little contrast */
-static uint8_t  s_dbg[RS_DEC_MAX_ROWS];
-static int      s_dbg_n = 0;
-static int      s_deque[RS_DEC_MAX_ROWS];
-static rs_run_t s_runs[RS_DEC_MAX_ROWS + 1];
-static float    s_prep_rpc = -1.0f;
-static const float *s_prep_p = 0;
-static int      s_prep_n = 0;
+static RS_TLS float    s_norm[RS_DEC_MAX_ROWS];      /* envelope-normalized profile, 0..1 */
+static RS_TLS float    s_amp[RS_DEC_MAX_ROWS];       /* local amplitude (envelope max - min) */
+static RS_TLS float    s_emin[RS_DEC_MAX_ROWS], s_emax[RS_DEC_MAX_ROWS];
+static RS_TLS uint8_t  s_bin[RS_DEC_MAX_ROWS];       /* 0/1, 2 = too little contrast */
+static RS_TLS uint8_t  s_dbg[RS_DEC_MAX_ROWS];
+static RS_TLS int      s_dbg_n = 0;
+static RS_TLS int      s_deque[RS_DEC_MAX_ROWS];
+static RS_TLS rs_run_t s_runs[RS_DEC_MAX_ROWS + 1];
+static RS_TLS float    s_prep_rpc = -1.0f;
+static RS_TLS const float *s_prep_p = 0;
+static RS_TLS int      s_prep_n = 0;
 
 #ifdef RS_DEC_DEBUG
 #include <stdio.h>
@@ -179,9 +189,9 @@ typedef struct {
     uint8_t  hist[RS_HIST];
 } surv_t;
 
-static float s_rpc_cur = 1.0f;                 /* rows per chip of the running detector, for the per-row metric */
-static int   s_wrap_at = 1 << 30;               /* cyclic decode: rows >= s_wrap_at read one packet period earlier (repeated packets) */
-static int   s_period_rows = 0;
+static RS_TLS float s_rpc_cur = 1.0f;                 /* rows per chip of the running detector, for the per-row metric */
+static RS_TLS int   s_wrap_at = 1 << 30;               /* cyclic decode: rows >= s_wrap_at read one packet period earlier (repeated packets) */
+static RS_TLS int   s_period_rows = 0;
 static inline float prof_at(int r) { if (r >= s_wrap_at) r -= s_period_rows; return s_norm[r]; }
 static float per_cell(const surv_t *s) { return s->ncells > 0 ? s->metric / ((float)s->ncells * s_rpc_cur) : 0.0f; }   /* mean squared error per row */
 
@@ -204,9 +214,9 @@ static long now_us_(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &
 #define RS_TIMED(idx, var) ((void)0)
 #endif
 int *rs_decode_debug_counters(void) { return s_cnt; }
-static float s_vit_rpc = 0;                      /* clock of the last successful viterbi's best survivor (PLL output) */
-static float s_vit_e = 0;                        /* exposure (rows) the winning hypothesis of decode_candidate used */
-static int   s_vit_ncells = 0;                   /* cells the best survivor covered (data + flush, without the filler) */
+static RS_TLS float s_vit_rpc = 0;                      /* clock of the last successful viterbi's best survivor (PLL output) */
+static RS_TLS float s_vit_e = 0;                        /* exposure (rows) the winning hypothesis of decode_candidate used */
+static RS_TLS int   s_vit_ncells = 0;                   /* cells the best survivor covered (data + flush, without the filler) */
 static int viterbi(int n, float start, float rpc, float e, float slip_chips, float abort_mse,
                    uint32_t *bits_out, float *mse_out, float *end_out)
 {
@@ -510,7 +520,7 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
 #define RS_MAX_CAND 6
 #define RS_CAND_BUDGET 16          /* detector runs per profile, across scales */
 typedef struct { float x, rpc, c; } cand_t;
-static float s_tmpl[512];
+static RS_TLS float s_tmpl[512];
 
 static void add_cand(cand_t *cands, int *nc, float x, float rpc, float c)
 {
@@ -673,7 +683,7 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     /* 1. candidates from every plausible scale (each scale normalizes the profile for its own
      *    chip length and correlates the sync template at 0.7x..1.3x of it) */
     static const float scales[] = { 2.0f, 3.5f, 6.0f, 10.0f, 17.0f, 28.0f };
-    static cand_t cands[6 * RS_MAX_CAND]; static float cand_scale[6 * RS_MAX_CAND];
+    static RS_TLS cand_t cands[6 * RS_MAX_CAND]; static RS_TLS float cand_scale[6 * RS_MAX_CAND];
     int nc = 0;
     float hint = cfg->rows_per_chip_hint;
     for (unsigned s = 0; s < sizeof(scales) / sizeof(scales[0]); s++) {

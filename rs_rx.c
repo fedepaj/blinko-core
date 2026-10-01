@@ -53,15 +53,18 @@ static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int
     return k;
 }
 
-static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
+/* Decoding of one channel's profile: the detector, then the grid decode on the same prepared
+ * profile. A pure function of the profile and the configuration, so channels can run in parallel. */
+static int decode_profile(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, rs_dec_stats_t *st)
 {
-    rs_packet_t out[32];
-    rx->cfg.rows_per_chip_hint = rx->rpc_n >= 3 ? rx->rows_per_chip : 0;   /* a single false accept must not lock the clock */
-    /* the hint narrows the sync search; it is kept only while packets keep coming (the board's
-     * chip length can change), so empty frames erode it and after a few the full search is back */
-    int k = rs_decode_profile(p, n, &rx->cfg, out, 32, &rx->last_stats);
+    int k = rs_decode_profile(p, n, &rx->cfg, out, 32, st);
+    return grid_decode(rx, p, n, out, k, 32);
+}
+
+/* Bookkeeping of one channel's packets: clock hint, packet list, assembly. Sequential. */
+static void take_packets(rs_rx_t *rx, const rs_packet_t *out, int k, uint8_t channel)
+{
     if (k == 0) { if (++rx->empty_frames >= 30) { rx->rpc_n = 0; rx->empty_frames = 0; } } else rx->empty_frames = 0;   /* a stale clock (chip changed) is released after 30 empty frames, not on every one */
-    k = grid_decode(rx, p, n, out, k, 32);
     for (int i = 0; i < k && rx->npkts < RS_RX_MAX_PKTS; i++) {
         rx->pkts[rx->npkts].pkt = out[i];
         rx->pkts[rx->npkts].channel = channel;
@@ -76,6 +79,35 @@ static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
         if (rs_asm_feed(&rx->assembler, &out[i], &m)) push_msg(rx, &m);
     }
 }
+
+/* The clock hint narrows the sync search; it needs 3 concordant packets (a single false accept
+ * must not lock the clock) and is kept only while packets keep coming (the board's chip length
+ * can change), see take_packets. */
+static void set_hint(rs_rx_t *rx) { rx->cfg.rows_per_chip_hint = rx->rpc_n >= 3 ? rx->rows_per_chip : 0; }
+
+static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
+{
+    rs_packet_t out[32];
+    set_hint(rx);
+    int k = decode_profile(rx, p, n, out, &rx->last_stats);
+    take_packets(rx, out, k, channel);
+}
+
+/* Three channels at once through the platform's parallel hook, then the bookkeeping in order. */
+typedef struct { rs_rx_t *rx; const float *p[3]; int n; rs_packet_t out[3][32]; int k[3]; rs_dec_stats_t st[3]; } rs_job3_t;
+static void job3(void *ctx, int i) { rs_job3_t *j = (rs_job3_t *)ctx; j->k[i] = decode_profile(j->rx, j->p[i], j->n, j->out[i], &j->st[i]); }
+static void decode_channels3(rs_rx_t *rx, const float *c0, const float *c1, const float *c2, int n)
+{
+    if (!rx->parallel) { decode_channel(rx, c0, n, 0); decode_channel(rx, c1, n, 1); decode_channel(rx, c2, n, 2); return; }
+    static rs_job3_t j;                         /* one frame at a time per receiver; the hook returns when every job is done */
+    j.rx = rx; j.p[0] = c0; j.p[1] = c1; j.p[2] = c2; j.n = n;
+    set_hint(rx);
+    rx->parallel(rx->parallel_user, 3, job3, &j);
+    for (int c = 0; c < 3; c++) take_packets(rx, j.out[c], j.k[c], (uint8_t)c);
+    rx->last_stats = j.st[2];
+}
+
+void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user) { rx->parallel = fn; rx->parallel_user = user; }
 
 void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep)
 {
@@ -125,12 +157,12 @@ int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, i
     rx->mode = rgb ? 1 : 0;
     if (rgb) {
         rs_rgb_unmix(&rx->cal, r, g, b, n, s_ch[0], s_ch[1], s_ch[2]);
-        for (int c = 0; c < 3; c++) decode_channel(rx, s_ch[c], n, (uint8_t)c);
+        decode_channels3(rx, s_ch[0], s_ch[1], s_ch[2], n);
     } else if (three) {
         /* three-coloured light but no pilot lock yet: decode the camera channels directly
          * (crosstalk is moderate for LED primaries; the CRC rejects what it corrupts) */
         rx->mode = 2;
-        decode_channel(rx, r, n, 0); decode_channel(rx, g, n, 1); decode_channel(rx, b, n, 2);
+        decode_channels3(rx, r, g, b, n);
     } else {
         for (int i = 0; i < n; i++) s_luma[i] = (r[i] + g[i] + b[i]) * (1.0f / 3.0f);
         decode_channel(rx, s_luma, n, 0);

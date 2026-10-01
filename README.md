@@ -27,7 +27,10 @@ make test-full   # the full sweep
 ```
 
 There is no build step for the C code: add the `rs_*.c` files to your project
-(the Python tools compile them on first use into `build/`).
+(the Python tools compile them on first use into `build/`). Define
+`RS_DEC_THREADS` and install a parallel-for hook (`rs_rx_set_parallel`,
+`rs_multi_set_parallel`) to decode a light's three channels on three threads;
+without it everything runs on the caller's thread.
 
 ## Minimal use
 

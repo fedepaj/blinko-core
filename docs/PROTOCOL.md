@@ -158,7 +158,12 @@ For each camera frame (`rs_multi_process`):
    outright — and the track re-evaluates them every 8 frames, or after an empty
    frame (at most every 3), keeping the one that yields more packets on this
    frame.
-4. **Decode** (`rs_rx_process`) on one or three profiles, see below.
+4. **Decode** (`rs_rx_process`) on one or three profiles, see below. The
+   three channels of a light are independent, so a platform can hand the
+   receiver a parallel-for hook (`rs_rx_set_parallel`, `rs_multi_set_parallel`)
+   and have them decoded on three threads; the core is built with
+   `RS_DEC_THREADS` so that the decoder's scratch is thread-local. The clock
+   hint is then the one at the start of the frame for every channel.
 5. **Assemble**: in multi-source mode assembly is deferred
    (`defer_assembly`), the cross-talk filter runs first, then
    `rs_rx_assemble` feeds the surviving packets to `rs_asm_feed`.
