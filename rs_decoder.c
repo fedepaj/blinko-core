@@ -665,6 +665,28 @@ static void refine_clock(int n, const rs_dec_cfg_t *cfg, float *x_io, float *rpc
     if (best_c > -1) { *x_io = best_x; *rpc_io = best_rpc; }
 }
 
+/* One validated sync candidate as a unit of parallel work (see rs_decode_profile, step 4). */
+typedef struct {
+    const float *p; int n; const rs_dec_cfg_t *cfg;
+    float scale, x, t0, rpc, amp;
+    rs_packet_t pk[2]; int npk;                   /* the packet after the sync and the one before it */
+    rs_dec_stats_t st;
+} rs_cjob_t;
+
+static void cand_job(void *ctx, int i)
+{
+    rs_cjob_t *j = &((rs_cjob_t *)ctx)[i];
+    if (s_prep_p != j->p || s_prep_n != j->n || fabsf_(s_prep_rpc - j->scale) > 1e-3f) prepare(j->p, j->n, j->scale, j->cfg->min_contrast);
+    s_cnt[1]++;
+    /* the packet after this sync; then the one before it, but only when this sync is trusted
+     * (its packet decoded) or its own packet did not fit the blob: a sync whose packet fit and
+     * failed the CRC is most likely not a sync, and every detector run on random data is a
+     * 1/4096 chance of a false CRC pass */
+    int fwd = decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 0, &j->pk[j->npk], &j->st);
+    if (fwd == 1) j->npk++;
+    if (fwd != 0) { s_cnt[3]++; if (decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 1, &j->pk[j->npk], &j->st) == 1) j->npk++; }
+}
+
 int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                       rs_packet_t *out, int max_out, rs_dec_stats_t *st)
 {
@@ -698,16 +720,18 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     RS_TIMED(8, tt0);
     /* 2. best correlations first, across scales, within the detector budget */
     for (int i = 1; i < nc; i++) { cand_t k = cands[i]; float ks = cand_scale[i]; int j = i - 1; while (j >= 0 && cands[j].c < k.c) { cands[j + 1] = cands[j]; cand_scale[j + 1] = cand_scale[j]; j--; } cands[j + 1] = k; cand_scale[j + 1] = ks; }
+    /* 3. validation (cheap, sequential): the candidates that survive, best first, up to the
+     *    budget. The checks cost no detector run; they also fix the clock from the ON run. */
     int budget = hint > 0 ? 6 : 24;
-    int nout = 0;
-    for (int i = 0; i < nc && budget > 0; i++) {
+    static RS_TLS rs_cjob_t jobs[24]; int nj = 0;       /* per calling thread: a channel's detector may itself run on a channel thread */
+    for (int i = 0; i < nc && nj < budget; i++) {
         float rpc = cands[i].rpc, x = cands[i].x;
-        if (fabsf_(s_prep_rpc - cand_scale[i]) > 1e-3f) prepare(p, n, cand_scale[i], cfg->min_contrast);
+        if (s_prep_p != p || s_prep_n != n || fabsf_(s_prep_rpc - cand_scale[i]) > 1e-3f) prepare(p, n, cand_scale[i], cfg->min_contrast);
         { RS_TIMER(tr0); refine_clock(n, cfg, &x, &rpc); RS_TIMED(9, tr0); }
         float er = e_rows_of(cfg, rpc);
         float t0 = x + (float)RS_SYNC_GAP_CHIPS * rpc + 0.5f * er;      /* where the ON run's 0.5-crossing sits */
         int dup = 0;
-        for (int j = 0; j < nout; j++) if (fabsf_(out[j].row_start - (x - 0.0f)) < 2.0f * rpc) { dup = 1; break; }
+        for (int j = 0; j < nj; j++) if (fabsf_(jobs[j].x - x) < 2.0f * rpc) { dup = 1; break; }   /* the same sync seen from another scale */
         if (dup) continue;
         st->syncs++;
         int a = iroundf_(x + RS_SYNC_GAP_CHIPS * rpc), b2 = iroundf_(x + (RS_SYNC_GAP_CHIPS + RS_SYNC_ON_CHIPS) * rpc);
@@ -740,21 +764,25 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                 if (mx < s_emin[b] + 0.5f * amp) continue;
             }
         }
-        rs_packet_t pkt; budget--; int fwd = 0; s_cnt[1]++;
         RS_DBG("cand scale %.1f x %.1f rpc %.3f (from %.1f/%.3f) corr %.2f amp %.1f\n", cand_scale[i], x, rpc, cands[i].x, cands[i].rpc, cands[i].c, amp);
-        for (int dir = 0; dir < 2; dir++) {
-            /* the packet after this sync; then the one before it, but only when this sync is
-             * trusted (its packet decoded) or its own packet did not fit the blob: a sync whose
-             * packet fit and failed the CRC is most likely not a sync, and every detector run on
-             * random data is a 1/4096 chance of a false CRC pass */
-            if (dir == 1) { if (budget <= 0 || fwd == 0) break; budget--; }
-            if (dir == 1) s_cnt[3]++;
-            int r = decode_candidate(n, cfg, t0, rpc, amp, dir, &pkt, st);
-            if (dir == 0) fwd = r;
-            if (r != 1) continue;
-            int d2 = 0;
-            for (int j = 0; j < nout; j++) if (fabsf_(out[j].row_start - pkt.row_start) < 2.0f * rpc) { d2 = 1; if (pkt.quality > out[j].quality) out[j] = pkt; break; }
-            if (!d2 && nout < max_out) out[nout++] = pkt;
+        rs_cjob_t *j = &jobs[nj++];
+        j->p = p; j->n = n; j->cfg = cfg; j->scale = cand_scale[i]; j->x = x; j->t0 = t0; j->rpc = rpc; j->amp = amp; j->npk = 0;
+        j->st.syncs = j->st.crc_ok = j->st.crc_fail = j->st.truncated = 0;
+    }
+    /* 4. detection (map): every validated candidate is independent — forward decode, then the
+     *    packet before the sync — so they run through the platform's parallel hook when there is
+     *    one (each job normalizes the profile for its own scale in its thread's scratch), else
+     *    in turn on this thread. */
+    if (cfg->parallel && nj > 1) cfg->parallel(cfg->parallel_user, nj, cand_job, jobs);
+    else for (int i = 0; i < nj; i++) cand_job(jobs, i);
+    /* 5. reduce: statistics, then the packets deduplicated by row (best quality kept) */
+    int nout = 0;
+    for (int i = 0; i < nj; i++) {
+        st->crc_fail += jobs[i].st.crc_fail; st->truncated += jobs[i].st.truncated;
+        for (int q = 0; q < jobs[i].npk; q++) {
+            const rs_packet_t *pkt = &jobs[i].pk[q]; int d2 = 0;
+            for (int j = 0; j < nout; j++) if (fabsf_(out[j].row_start - pkt->row_start) < 2.0f * jobs[i].rpc) { d2 = 1; if (pkt->quality > out[j].quality) out[j] = *pkt; break; }
+            if (!d2 && nout < max_out) out[nout++] = *pkt;
         }
     }
     for (int i = 1; i < nout; i++) {                 /* sort by row */

@@ -23,11 +23,6 @@ typedef struct {
     uint8_t channel;         /* 0..2, or 0 in luma mode */
 } rs_rx_packet_t;
 
-/* Platform hook to decode the three channels of a frame at once: call job(ctx, i) for
- * i = 0..count-1 on separate threads and return when all are done (the core itself has no
- * threads; the decoder must be built with RS_DEC_THREADS so that its scratch is per thread). */
-typedef void (*rs_parallel_fn)(void *user, int count, void (*job)(void *ctx, int i), void *ctx);
-
 typedef struct {
     rs_dec_cfg_t  cfg;
     rs_asm_t      assembler;
@@ -41,7 +36,7 @@ typedef struct {
     uint32_t      grid_ok;          /* packets decoded at a predicted grid position (no sync) */
     int           defer_assembly;   /* 1: rs_rx_process only decodes; rs_rx_assemble() feeds the assembler */
     rs_dec_stats_t last_stats;   /* of the last decoded channel */
-    rs_parallel_fn parallel;     /* optional: decodes the channels of a frame in parallel (see rs_parallel_fn) */
+    rs_parallel_fn parallel;     /* optional: decodes the channels of a frame in parallel (rs_parallel_fn in rs_decoder.h); also handed to the decoder via cfg */
     void          *parallel_user;
     int           npkts;
     rs_rx_packet_t pkts[RS_RX_MAX_PKTS];

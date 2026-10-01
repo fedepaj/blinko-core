@@ -50,7 +50,8 @@ class Tx(ctypes.Structure):
 class DecCfg(ctypes.Structure):
     _fields_ = [("min_rows_per_chip", ctypes.c_float), ("max_rows_per_chip", ctypes.c_float), ("sync_tol", ctypes.c_float), ("min_contrast", ctypes.c_float),
                 ("track_timing", ctypes.c_int), ("min_quality", ctypes.c_float), ("rows_per_chip_hint", ctypes.c_float),
-                ("timing_retries", ctypes.c_int), ("grid_decode", ctypes.c_int), ("exposure_rows", ctypes.c_float)]
+                ("timing_retries", ctypes.c_int), ("grid_decode", ctypes.c_int), ("exposure_rows", ctypes.c_float),
+                ("parallel", ctypes.c_void_p), ("parallel_user", ctypes.c_void_p)]
 
 
 class Packet(ctypes.Structure):

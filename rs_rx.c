@@ -107,7 +107,7 @@ static void decode_channels3(rs_rx_t *rx, const float *c0, const float *c1, cons
     rx->last_stats = j.st[2];
 }
 
-void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user) { rx->parallel = fn; rx->parallel_user = user; }
+void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user) { rx->parallel = fn; rx->parallel_user = user; rx->cfg.parallel = fn; rx->cfg.parallel_user = user; }
 
 void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep)
 {

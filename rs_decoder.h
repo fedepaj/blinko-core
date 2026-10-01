@@ -17,6 +17,12 @@ extern "C" {
 
 #define RS_DEC_MAX_ROWS 4096
 
+/* Platform hook for parallel work: call job(ctx, i) for i = 0..count-1 on separate threads and
+ * return when all are done. The core has no threads of its own; the decoder's scratch must be
+ * thread-local (build with RS_DEC_THREADS) for the jobs to run concurrently. Used by the receiver
+ * for a light's three channels and by the detector for its sync candidates. */
+typedef void (*rs_parallel_fn)(void *user, int count, void (*job)(void *ctx, int i), void *ctx);
+
 typedef struct {
     float min_rows_per_chip;  /* chip clocks searched, in rows per chip; default 1.2 */
     float max_rows_per_chip;  /* default 30 */
@@ -28,6 +34,8 @@ typedef struct {
     int   timing_retries;     /* clock hypotheses around the sync's: 1 = +-2.5 % (default), 2 = also +-5 %; 0 = the sync's only */
     int   grid_decode;        /* receiver: also decode at predicted grid positions next to decoded packets (default 1) */
     float exposure_rows;      /* camera exposure in rows (exposure_us / row_us); 0 = unknown, half a chip is assumed */
+    rs_parallel_fn parallel;  /* optional: the validated sync candidates of a profile are detected in parallel (map), then merged (reduce) */
+    void *parallel_user;
 } rs_dec_cfg_t;
 
 typedef struct {
