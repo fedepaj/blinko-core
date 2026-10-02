@@ -77,6 +77,26 @@ static float match(const rs_stitch_t *s, const float *norm, int r0, int r1, floa
     return cov / r;
 }
 
+
+/* Correlation of a new piece against one stored piece at a phase offset (in cells); -2 when
+ * fewer than 6 chips overlap. Used to chain pieces when no sync anchors them. */
+static float match_piece(const rs_piece_t *pc, const float *norm, int r0, int r1, float phase_cells, float rpc)
+{
+    float sxy = 0, sxx = 0, syy = 0, sx = 0, sy = 0; int cnt = 0;
+    float cells_per_row = (float)RS_STITCH_RES / rpc;
+    for (int r = r0; r < r1; r++) {
+        int c = (int)fmodp_(phase_cells + ((float)r + 0.5f) * cells_per_row, (float)RS_STITCH_N);
+        if (!pc->has[c]) continue;
+        float x = norm[r], y = pc->val[c];
+        sxy += x * y; sxx += x * x; syy += y * y; sx += x; sy += y; cnt++;
+    }
+    if (cnt < 6 * (int)(rpc + 0.5f)) return -2;
+    float n = (float)cnt, cov = sxy - sx * sy / n, vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
+    if (vx <= 1e-6f || vy <= 1e-6f) return -2;
+    float d = vx * vy, r = 1; for (int i = 0; i < 12; i++) r = 0.5f * (r + d / r);
+    return cov / r;
+}
+
 /* Store a piece: the mean normalized brightness per cell of the cycle it covers. */
 static void place(rs_stitch_t *s, const float *norm, int r0, int r1, float phase_cells, float rpc, float t)
 {
@@ -120,10 +140,11 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
         /* no clock known yet: the shortest runs of the piece are 3 chips (the code's minimum run
          * is frequent), so a low percentile of the binarized run lengths gives the clock to ~10 % */
         int lens[256], nl = 0, cur = 0, lvl = norm[r0] >= 0.5f;
-        for (int r = r0; r < r1 && nl < 256; r++) { int l = norm[r] >= 0.5f; if (l == lvl) cur++; else { lens[nl++] = cur; cur = 1; lvl = l; } }
+        for (int r = r0; r < r1 && nl < 256; r++) { int l = norm[r] >= 0.5f; if (l == lvl) cur++; else { if (cur >= 3) lens[nl++] = cur; cur = 1; lvl = l; } }   /* runs under 3 rows are threshold glitches */
         if (nl >= 6) {
             for (int i = 1; i < nl; i++) { int k = lens[i], j = i - 1; while (j >= 0 && lens[j] > k) { lens[j + 1] = lens[j]; j--; } lens[j + 1] = k; }
-            ref = (float)lens[nl / 6] / (float)RS_RLL_MIN_RUN;
+            ref = (float)lens[nl / 5] / (float)RS_RLL_MIN_RUN;
+            ST_DBG("t=%.3f clock from run lengths: %.2f rows/chip (%d runs)\n", t, ref, nl);
         }
     }
     for (int i = 0; i < ns; i++) {
@@ -134,8 +155,9 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
     }
     ns = sy ? 1 : 0;
     float rpc = sy ? sy->rpc : (s->rpc_est > 0 ? s->rpc_est : (rpc_hint > 0 ? rpc_hint : s->rpc));
+    if (rpc <= 0) rpc = s->rpc_chain > 0 ? s->rpc_chain : ref;         /* the run-length estimate (~10 %): enough to chain pieces, the detector refines the rest */
     if (rpc <= 0) { ST_DBG("t=%.3f no clock (hint %.2f)\n", t, rpc_hint); return 0; }
-    if ((float)(r1 - r0) > (float)RS_PKT_CHIPS * rpc) return 0;          /* the blob holds a whole packet: the detector's job, nothing to stitch */
+    if ((float)(r1 - r0) > (float)RS_PKT_CHIPS * rpc) { ST_DBG("t=%.3f blob %d rows holds a whole packet at %.2f rows/chip: not stitched\n", t, r1 - r0, rpc); return 0; }   /* the detector's job */
     int trim = iroundf_(1.0f * rpc); r0 += trim; r1 -= trim;
     if (r1 - r0 < iroundf_(RS_SYNC_CHIPS * rpc)) { ST_DBG("t=%.3f piece too short (%d rows)\n", t, r1 - r0); return 0; }
     ST_DBG("t=%.3f rows %d-%d sync %s rpc %.2f%s\n", t, r0, r1, sy ? "yes" : "no", rpc, sy ? "" : (s->have_anchor && s->chip_seconds > 0 ? " predicted" : " no anchor"));
@@ -161,6 +183,7 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
     }
     if (sy) {
         phase = fmodp_(-sy->x / rpc, (float)RS_PKT_CHIPS); anchored = 1;
+        if (s->chain_mode) { restart(s); s->chain_mode = 0; ST_DBG("  anchor after chained pieces: composite restarted\n"); }
         /* remember the anchor, drop stale ones, fit the chip period to the recent anchors */
         if (s->anc_n && t - s->anc_t[(s->anc_head + 8 - 1) % 8] > 2.0f) { s->anc_n = 0; s->chip_seconds_locked = 0; }
         s->anc_t[s->anc_head] = t; s->anc_phase[s->anc_head] = phase; s->anc_head = (s->anc_head + 1) % 8; if (s->anc_n < 8) s->anc_n++;
@@ -205,11 +228,58 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
             }
         }
         s->have_anchor = 1; s->t_anchor = t; s->phase_anchor = phase;
+    } else if (s->have_anchor && s->chip_seconds > 0 && t - s->t_anchor >= 0 && t - s->t_anchor <= 2.0f) {
+        phase = fmodp_(s->phase_anchor + (t - s->t_anchor) / s->chip_seconds, (float)RS_PKT_CHIPS);
     } else {
-        if (!s->have_anchor || s->chip_seconds <= 0) return 0;
-        float dt = t - s->t_anchor;
-        if (dt < 0 || dt > 2.0f) return 0;                              /* prediction too stale */
-        phase = fmodp_(s->phase_anchor + dt / s->chip_seconds, (float)RS_PKT_CHIPS);
+        /* no sync anchors the piece and no period is known (a blob too short to ever show a whole
+         * sync): chain it on the previous frame's piece by correlation. The frame-to-frame phase
+         * step is constant, so consecutive pieces overlap when the step is smaller than a piece;
+         * the composite then contains the sync somewhere and the detector finds it. */
+        if (s->npieces == 0) { s->rpc_chain = rpc; s->chain_mode = 1; s->chain_chips = 0; place(s, norm, r0, r1, 0, rpc, t); ST_DBG("  first piece, phase origin arbitrary\n"); return 0; }
+        if (!s->chain_mode) { restart(s); s->rpc_chain = rpc; s->chain_mode = 1; s->chain_chips = 0; place(s, norm, r0, r1, 0, rpc, t); return 0; }   /* anchored pieces without a lock cannot be chained to */
+        const rs_piece_t *prev = &s->piece[(s->phead + RS_STITCH_PIECES - 1) % RS_STITCH_PIECES];
+        if (t - prev->t > 0.2f) { restart(s); s->chain_chips = 0; place(s, norm, r0, r1, 0, rpc, t); ST_DBG("  chain broken (%.2f s): restart\n", t - prev->t); return 0; }
+        int span = (int)((float)(r1 - r0) / rpc * (float)RS_STITCH_RES);   /* up to a whole piece either way */
+        float best = -2, bestpc = prev->phase_cells;
+        for (int d = -span; d <= span; d++) { float c = match_piece(prev, norm, r0, r1, prev->phase_cells + (float)d, rpc); if (c > best) { best = c; bestpc = prev->phase_cells + (float)d; } }
+        float lag = (bestpc - prev->phase_cells) / (float)RS_STITCH_RES;
+        ST_DBG("  chained on the previous piece: corr %.2f at %+.1f chips\n", best, lag);
+        if (best < 0.6f) { restart(s); s->chain_chips = 0; place(s, norm, r0, r1, 0, rpc, t); return 0; }
+        s->chain_chips += lag < 0 ? -lag : lag;
+        if (s->chain_chips > (float)RS_PKT_CHIPS - 10.0f) {
+            /* the chain has gone round the cycle: the new piece now overlaps the oldest pieces, and
+             * if the clock is off the cycle closed at the wrong length, by 82 * (true/assumed - 1)
+             * chips per turn. The offset that best fits the composite (without the previous piece,
+             * which the chain already agrees with) measures it; the clock is corrected and the
+             * chain restarted at the new clock (its pieces were laid out at the old one). */
+            int skip_prev = 1; (void)skip_prev;
+            float bc = -2, bpc = bestpc; int w = 12 * RS_STITCH_RES;
+            compose(s, t, 1);                                           /* composite of everything but the previous piece */
+            for (int d = -w; d <= w; d++) { float c = match(s, norm, r0, r1, bestpc + (float)d, rpc); if (c > bc) { bc = c; bpc = bestpc + (float)d; } }
+            float err = (bpc - bestpc) / (float)RS_STITCH_RES;         /* chips the cycle is short (+) or long (-) */
+            ST_DBG("  wrap check: corr %.2f at %+.1f chips -> clock %.3f", bc, err, rpc);
+            /* Correcting the clock from this measurement proved unstable on real frames (it
+             * overshoots: 6.4 -> 7.1 -> 8.0 for a true 6.6), so the measurement is only traced for
+             * now; chained pieces decode when the run-length clock happens to be within ~3 %.
+             * Open: a stable period estimate for blobs that never show a whole sync. */
+            if (0 && bc >= 0.6f && (err > 0.6f || err < -0.6f) && s->chain_fixes < 6) {
+                float turns = s->chain_chips / (float)RS_PKT_CHIPS;
+                float rpc2 = rpc * (1.0f + err / ((float)RS_PKT_CHIPS * turns));
+                s->rpc_chain = rpc2; s->chain_fixes++;
+                ST_DBG(" -> %.3f (restart)\n", rpc2);
+                restart(s); s->chain_chips = 0; place(s, norm, r0, r1, 0, rpc2, t);
+                return 0;
+            }
+            ST_DBG(" (kept)\n");
+            s->chain_chips -= (float)RS_PKT_CHIPS;                      /* measure again after the next turn */
+        }
+        phase = fmodp_(bestpc / (float)RS_STITCH_RES, (float)RS_PKT_CHIPS);
+        s->rpc = rpc;
+        place(s, norm, r0, r1, phase * (float)RS_STITCH_RES, rpc, t);
+        int covered = compose(s, t, 0);
+        ST_DBG("  chained piece placed; composite covers %d/%d chips from %d pieces\n", covered, RS_PKT_CHIPS, s->npieces);
+        if (covered < RS_PKT_CHIPS) return 0;
+        goto decode;
     }
     s->rpc = rpc;
     float pc = phase * (float)RS_STITCH_RES;                            /* in cells */
@@ -227,10 +297,14 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
     covered = compose(s, t, 0);
     ST_DBG("  placed at phase %.1f chips; composite covers %d/%d chips from %d pieces\n", pc / RS_STITCH_RES, covered, RS_PKT_CHIPS, s->npieces);
     if (covered < RS_PKT_CHIPS) return 0;
+decode:;
     /* lay the cycle out twice as a profile at RS_STITCH_RES rows per chip and decode it; if
      * that fails, once more without the newest piece (it may already belong to the next packet) */
     static float prof[2 * RS_STITCH_N];
-    rs_dec_cfg_t c1 = *cfg; c1.exposure_rows = 1.0f; c1.rows_per_chip_hint = (float)RS_STITCH_RES; c1.parallel = 0; c1.min_contrast = 10.0f;
+    /* the composite carries the camera's exposure smear (in chips: exposure rows / rows per chip)
+     * plus about half a chip of placement blur; the detector's templates must match it */
+    float e_chips = (cfg->exposure_rows > 0 ? cfg->exposure_rows / rpc : 0.5f) + 0.5f;
+    rs_dec_cfg_t c1 = *cfg; c1.exposure_rows = e_chips * (float)RS_STITCH_RES; c1.rows_per_chip_hint = (float)RS_STITCH_RES; c1.parallel = 0; c1.min_contrast = 10.0f;
     rs_packet_t pk[4]; rs_dec_stats_t st; int k = 0;
     for (int attempt = 0; attempt < 2 && k <= 0; attempt++) {
         if (attempt == 1 && compose(s, t, 1) < RS_PKT_CHIPS) break;

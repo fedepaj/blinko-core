@@ -43,6 +43,10 @@ typedef struct {
     float rpc_est;                                    /* clock agreed by the syncs seen (median of the last few); a sync off by > 4 % is not an anchor */
     float rpc_seen[8]; int rpc_seen_n, rpc_seen_head;
     int   misses;                                     /* anchors rejected against the locked prediction in a row; 3 unlock */
+    float chain_chips;                                /* chips travelled by the chain of unanchored pieces since its first piece */
+    int   chain_mode;                                 /* the stored pieces are chained (arbitrary phase origin), not anchored */
+    float rpc_chain;                                  /* clock used by the chain (run-length estimate), kept apart from the syncs' */
+    int   chain_fixes;                                /* clock corrections made at the wrap of a chain */
     int   pieces;                                     /* pieces placed since the last decode */
     uint32_t placed_total, decoded_total, restarts;   /* statistics */
 } rs_stitch_t;
