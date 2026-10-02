@@ -53,15 +53,19 @@ typedef struct {
 
 void rs_stitch_init(rs_stitch_t *s);
 
-/* Feed one frame of one channel. p: the raw profile (the lit blob's extent is read from it);
- * norm/amp: the detector's normalized profile and local amplitude for this profile (rs_decode_normalized after rs_decode_profile / rs_decode_syncs),
- * n rows; syncs: validated sync positions of this frame (rs_decode_syncs), ns of them; rpc_hint:
- * the receiver's clock when no sync is in view (0 = unknown); row_seconds: the sensor row time
- * (0 = unknown, then stitching needs a sync in every frame); t: frame time in seconds.
- * When the cycle is complete the packet is decoded with cfg into *out; returns 1 then, else 0. */
-int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const float *amp, int n, float min_contrast,
-                   const rs_sync_t *syncs, int ns, float rpc_hint, float row_seconds, float t,
-                   const rs_dec_cfg_t *cfg, rs_packet_t *out);
+typedef struct {
+    const float *p, *norm, *amp;    /* raw profile, the detector's normalized profile and local amplitude (rs_decode_normalized) */
+    int n;                          /* rows */
+    const rs_sync_t *syncs; int ns; /* validated syncs of this frame (rs_decode_syncs / rs_decode_last_syncs) */
+    float rpc_hint;                 /* the receiver's clock (0 = unknown) */
+    float row_seconds;              /* sensor row time (0 = unknown: no phase prediction between frames) */
+    float t;                        /* frame time, seconds */
+    const rs_dec_cfg_t *cfg;        /* decoder configuration (min_contrast, exposure_rows; the composite is decoded with it) */
+} rs_stitch_in_t;
+
+/* Feed one frame of one channel. When the cycle is complete the packet is decoded into *out;
+ * returns 1 then, else 0. */
+int rs_stitch_feed(rs_stitch_t *s, const rs_stitch_in_t *in, rs_packet_t *out);
 
 #ifdef __cplusplus
 }

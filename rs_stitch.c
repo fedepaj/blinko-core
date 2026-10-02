@@ -110,10 +110,12 @@ static void place(rs_stitch_t *s, const float *norm, int r0, int r1, float phase
     s->pieces++; s->placed_total++;
 }
 
-int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const float *amp, int n, float min_contrast,
-                   const rs_sync_t *syncs, int ns, float rpc_hint, float row_seconds, float t,
-                   const rs_dec_cfg_t *cfg, rs_packet_t *out)
+int rs_stitch_feed(rs_stitch_t *s, const rs_stitch_in_t *in, rs_packet_t *out)
 {
+    const float *p = in->p, *norm = in->norm, *amp = in->amp; int n = in->n;
+    const rs_sync_t *syncs = in->syncs; int ns = in->ns;
+    float rpc_hint = in->rpc_hint, row_seconds = in->row_seconds, t = in->t, min_contrast = in->cfg->min_contrast;
+    const rs_dec_cfg_t *cfg = in->cfg;
     /* the usable piece: the lit blob, read from the raw profile as the longest stretch above
      * a quarter of its range (the detector's local amplitude lags the blob's edges by half its
      * normalization window, which would add chips of noise at both ends), trimmed by a chip

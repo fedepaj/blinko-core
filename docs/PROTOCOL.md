@@ -194,8 +194,8 @@ camera's exposure smear to the analogue profile. One row integrates the LED
 over the exposure window E, so a step becomes a ramp E rows long and a 3-chip
 run at E = T has only 64 % of its amplitude; the templates reproduce that, so
 the detector works up to E ≈ 2–3 T where a threshold decoder stops at E ≈ T.
-The app passes the exposure in rows (`exposure_rows = exposure_µs / row_µs`);
-half a chip is assumed when unknown, and 1.4× and 2× the given value are also
+The app passes the exposure in rows (`rs_rx_set_camera`: `exposure_µs / row_µs`
+and the row time); half a chip is assumed when unknown, and 1.4× and 2× the given value are also
 tried because phones report less exposure than their edges show.
 
 Per profile:
@@ -289,8 +289,8 @@ a frame yielded no packet, the receiver:
 3. learns the **chip period in seconds** from the anchored frames: their
    phases must all equal `phase0 + t/period` modulo the cycle. A frame is a
    thousand chips, so a wrong period scatters the phases; the period is found
-   by a search of ±12 % around the row-time guess (`rs_rx_set_row_time`,
-   which the apps take from the strobe calibration), outward from the guess
+   by a search of ±12 % around the row-time guess (`rs_rx_set_camera`,
+   which the apps fill from the strobe calibration), outward from the guess
    because periods one cycle-per-frame apart fit the anchors equally, and is
    refined within ±2 % afterwards. Three agreeing anchors lock it;
 4. predicts the phase of frames without a sync from the last anchor and the
@@ -401,3 +401,4 @@ The reset cause (`RSTSR0/1/2`) is included in the STATUS at every boot.
 | channels | 3 (RGB), pilot every 30 ms (36 chips) |
 | visible blink | 150 ms on / 50 ms off |
 | FAULT weight | 3 in the death loops |
+| death loop timing | T = 120 µs, 3 copies, one stream on the fault LED, 150/50 ms bursts, full brightness: the setting every phone tried could read, independent of the running one |

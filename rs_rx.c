@@ -114,7 +114,7 @@ static void decode_channels3(rs_rx_t *rx, const float *c0, const float *c1, cons
     rx->last_stats = j.st[2];
 }
 
-void rs_rx_set_row_time(rs_rx_t *rx, float seconds) { rx->row_seconds = seconds; }
+void rs_rx_set_camera(rs_rx_t *rx, rs_camera_t cam) { rx->cfg.exposure_rows = cam.exposure_rows; rx->row_seconds = cam.row_seconds; }
 
 /* Stitching: when a channel's frame yielded no packet, its piece joins the stitcher of that
  * channel. Runs on the thread that ran the detector on this profile (the decoder's validated
@@ -126,7 +126,8 @@ static int stitch_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel, i
     if (ns < 0) ns = rs_decode_syncs(p, n, &rx->cfg, syncs, 4);
     const float *norm, *amp; int m; rs_decode_normalized(&norm, &amp, &m);
     if (m != n) return 0;
-    return rs_stitch_feed(&rx->stitch[channel], p, norm, amp, n, rx->cfg.min_contrast, syncs, ns, rx->cfg.rows_per_chip_hint, rx->row_seconds, t, &rx->cfg, out);
+    rs_stitch_in_t in = { p, norm, amp, n, syncs, ns, rx->cfg.rows_per_chip_hint, rx->row_seconds, t, &rx->cfg };
+    return rs_stitch_feed(&rx->stitch[channel], &in, out);
 }
 
 void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user) { rx->parallel = fn; rx->parallel_user = user; rx->cfg.parallel = fn; rx->cfg.parallel_user = user; }

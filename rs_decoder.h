@@ -17,6 +17,11 @@ extern "C" {
 
 #define RS_DEC_MAX_ROWS 4096
 
+/* What the receiver needs to know about the camera: the exposure in sensor rows of the profile
+ * it is given (exposure_us / row_us; 0 = unknown, half a chip is assumed) and the row time in
+ * seconds (0 = unknown; the stitcher then cannot predict phases across frames). */
+typedef struct { float exposure_rows; float row_seconds; } rs_camera_t;
+
 /* Platform hook for parallel work: call job(ctx, i) for i = 0..count-1 on separate threads and
  * return when all are done. The core has no threads of its own; the decoder's scratch must be
  * thread-local (build with RS_DEC_THREADS) for the jobs to run concurrently. Used by the receiver
@@ -85,9 +90,6 @@ int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start
  * very profile (valid right after them; do not use after decoding another profile). */
 int rs_decode_at_prepared(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
 
-/* Debug: binarized profile of the last scale that produced a packet
- * (or the last scale tried). Values 0/1, or 2 for low-contrast rows. */
-const uint8_t *rs_decode_debug_binary(int *n);
 
 #ifdef __cplusplus
 }

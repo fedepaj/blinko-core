@@ -62,8 +62,6 @@ static RS_TLS float    s_norm[RS_DEC_MAX_ROWS];      /* envelope-normalized prof
 static RS_TLS float    s_amp[RS_DEC_MAX_ROWS];       /* local amplitude (envelope max - min) */
 static RS_TLS float    s_emin[RS_DEC_MAX_ROWS], s_emax[RS_DEC_MAX_ROWS];
 static RS_TLS uint8_t  s_bin[RS_DEC_MAX_ROWS];       /* 0/1, 2 = too little contrast */
-static RS_TLS uint8_t  s_dbg[RS_DEC_MAX_ROWS];
-static RS_TLS int      s_dbg_n = 0;
 static RS_TLS int      s_deque[RS_DEC_MAX_ROWS];
 static RS_TLS rs_run_t s_runs[RS_DEC_MAX_ROWS + 1];
 static RS_TLS float    s_prep_rpc = -1.0f;
@@ -840,8 +838,6 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     }
     return nout;
 }
-
-const uint8_t *rs_decode_debug_binary(int *n) { if (n) *n = s_dbg_n; return s_dbg; }
 
 int rs_decode_last_syncs(const float *p, int n, rs_sync_t *out, int max_out)
 {

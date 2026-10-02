@@ -296,16 +296,10 @@ static void link_tracks(rs_multi_t *m, float t)
     }
 }
 
-void rs_multi_set_exposure_rows(rs_multi_t *m, float rows)
+void rs_multi_set_camera(rs_multi_t *m, rs_camera_t cam)
 {
-    m->exposure_rows = rows;
-    for (int i = 0; i < RS_MAX_TRACKS; i++) m->tracks[i].rx.cfg.exposure_rows = rows;
-}
-
-void rs_multi_set_row_time(rs_multi_t *m, float seconds)
-{
-    m->row_seconds = seconds;
-    for (int i = 0; i < RS_MAX_TRACKS; i++) rs_rx_set_row_time(&m->tracks[i].rx, seconds);
+    m->camera = cam;
+    for (int i = 0; i < RS_MAX_TRACKS; i++) rs_rx_set_camera(&m->tracks[i].rx, cam);
 }
 
 void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user)
@@ -353,9 +347,8 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         tr->amp_typ = 0; tr->amp_n = 0;
         for (int j = 0; j < RS_MAX_TRACKS; j++) { m->link[k][j] = m->link[j][k] = 0; m->linked[k][j] = m->linked[j][k] = 0; }
         rs_rx_init(&tr->rx);
-        tr->rx.cfg.exposure_rows = m->exposure_rows;
+        rs_rx_set_camera(&tr->rx, m->camera);
         rs_rx_set_parallel(&tr->rx, m->parallel, m->parallel_user);
-        rs_rx_set_row_time(&tr->rx, m->row_seconds);
         tr->rx.defer_assembly = 1;
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;
@@ -381,23 +374,11 @@ int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id)
 
 size_t rs_multi_sizeof(void) { return sizeof(rs_multi_t); }
 
-/* Reported tracks are the confirmed ones: a light that decoded something, or one seen for a
- * while (a reflection or a speck at the frame edge lives a few frames and never decodes). */
 static int confirmed(const rs_track_t *tr)
 {
     return tr->active && (tr->rx.packets_total > 0 || tr->seen_frames >= RS_TRACK_CONFIRM_FRAMES);
 }
-const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i)
-{
-    const rs_track_t *tr = rs_multi_track(m, i);
-    return tr ? &tr->rx : NULL;
-}
-float rs_multi_link_score(const rs_multi_t *m, int i, int j)
-{
-    const rs_track_t *a = rs_multi_track(m, i), *b = rs_multi_track(m, j);
-    if (!a || !b) return 0;
-    return m->link[(int)(a - m->tracks)][(int)(b - m->tracks)];
-}
+
 int rs_multi_track_group(const rs_multi_t *m, int i)
 {
     const rs_track_t *tr = rs_multi_track(m, i);

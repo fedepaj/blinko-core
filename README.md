@@ -49,6 +49,8 @@ Receiver — the platform only supplies per-row profiles:
 
 ```c
 rs_rx_t rx; rs_rx_init(&rx);
+rs_camera_t cam = { exposure_us / row_us, row_us * 1e-6f };   /* what the camera does: exposure in rows, row time */
+rs_rx_set_camera(&rx, cam);
 rs_frame_profile_rgb(px, w, h, row_stride, pixel_stride, 2, 1, 0, 0, r, g, b, &info);
 rs_rx_process(&rx, r, g, b, info.count, t_seconds);   /* b == NULL: r is luma */
 rs_message_t m;

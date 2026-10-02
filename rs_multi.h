@@ -42,9 +42,8 @@ typedef struct {
     float link[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* pair evidence: identical data packets in the same frame, decayed */
     unsigned char linked[RS_MAX_TRACKS][RS_MAX_TRACKS];   /* current link state (hysteresis) */
     unsigned char keep[RS_MAX_TRACKS][RS_RX_MAX_PKTS];    /* per-frame cross-talk mask */
-    float exposure_rows;       /* camera exposure in rows, pushed into every track's decoder (0 = unknown) */
+    rs_camera_t camera;        /* pushed into every track's receiver (see rs_multi_set_camera) */
     rs_parallel_fn parallel; void *parallel_user;   /* see rs_multi_set_parallel */
-    float row_seconds;                               /* see rs_multi_set_row_time */
     int next_id;
     int nblobs;                /* blobs found in the last frame */
     rs_blob_t blobs[RS_MAX_BLOBS];
@@ -52,12 +51,11 @@ typedef struct {
 
 void rs_multi_init(rs_multi_t *m);
 /* Camera exposure in rows (exposure_us / row_us) for the exposure-aware detector; 0 = unknown. */
-void rs_multi_set_exposure_rows(rs_multi_t *m, float rows);
+void rs_multi_set_camera(rs_multi_t *m, rs_camera_t cam);   /* exposure rows and row time for every track's receiver, present and future */
 /* Platform hook for decoding a light's three channels on several threads (see rs_rx.h); applies
  * to every track, present and future. */
 void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user);
-/* Sensor row time in seconds for every track's receiver (stitching); 0 = unknown. */
-void rs_multi_set_row_time(rs_multi_t *m, float seconds);
+
 
 /* Process one interleaved RGB(A) frame. Returns the total packets decoded. */
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
@@ -67,7 +65,7 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
  * to because both lights transmit the same packets (two LEDs of one board). */
 int rs_multi_track_group(const rs_multi_t *m, int i);
 /* Same-board evidence between the i-th and j-th reported tracks (diagnostics). */
-float rs_multi_link_score(const rs_multi_t *m, int i, int j);
+
 
 /* Pop the next message from any track; *track_id receives the logical source (group id). */
 int rs_multi_pop_message(rs_multi_t *m, rs_message_t *out, int *track_id);

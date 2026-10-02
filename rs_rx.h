@@ -56,14 +56,13 @@ void rs_rx_init(rs_rx_t *rx);
  * treat r as luma (single-channel). t: time in seconds (for pilot expiry).
  * Returns the number of packets decoded; complete messages are queued. */
 /* 1 when all three camera channels are modulated (an RGB LED), 0 for a single-colour light. */
-int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);
+int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);   /* used by rs_multi for the profile hypothesis choice */
 /* With defer_assembly set: feed this frame's packets (pkts[i] with keep[i] != 0, or all when
  * keep is NULL) to the assembler. Lets a multi-source receiver drop cross-talk first. */
 /* Install the platform's parallel hook (see rs_parallel_fn); NULL decodes the channels in turn. */
 void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user);
-/* The sensor's row time in seconds (exposure_us / rows is the app's; here time per row), so the
- * stitcher can predict a piece's phase between frames that show a sync. 0 = unknown. */
-void rs_rx_set_row_time(rs_rx_t *rx, float seconds);
+/* The camera's exposure (in rows of the profiles given) and row time (seconds), see rs_camera_t. */
+void rs_rx_set_camera(rs_rx_t *rx, rs_camera_t cam);
 uint32_t rs_rx_stitched(const rs_rx_t *rx);   /* packets obtained by stitching pieces across frames */
 void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep);
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);

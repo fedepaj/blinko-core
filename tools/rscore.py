@@ -100,7 +100,9 @@ _lib.rs_rx_sizeof.restype = ctypes.c_size_t
 _lib.rs_rx_init.argtypes = [ctypes.c_void_p]
 _lib.rs_rx_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
 _lib.rs_rx_process.restype = ctypes.c_int
-for _name, _args, _ret in (("rs_rx_set_row_time", [ctypes.c_void_p, ctypes.c_float], None), ("rs_rx_set_parallel", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], None),
+class Camera(ctypes.Structure):
+    _fields_ = [("exposure_rows", ctypes.c_float), ("row_seconds", ctypes.c_float)]
+for _name, _args, _ret in (("rs_rx_set_camera", [ctypes.c_void_p, Camera], None), ("rs_multi_set_camera", [ctypes.c_void_p, Camera], None), ("rs_rx_set_parallel", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], None),
                            ("rs_rx_stitched", [ctypes.c_void_p], ctypes.c_uint32)):
     if hasattr(_lib, _name): getattr(_lib, _name).argtypes = _args; getattr(_lib, _name).restype = _ret   # absent in older builds loaded via RS_LIB
 _lib.rs_rx_pop_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(Message)]
@@ -264,7 +266,10 @@ class Receiver:
         self.buf = ctypes.create_string_buffer(_lib.rs_rx_sizeof())
         _lib.rs_rx_init(self.buf)
 
-    def set_row_time(self, seconds): _lib.rs_rx_set_row_time(self.buf, ctypes.c_float(seconds))
+    @property
+    def cfg(self): return DecCfg.from_address(ctypes.addressof(self.buf))   # cfg is the first field of rs_rx_t
+    def set_camera(self, exposure_rows=0.0, row_seconds=0.0): _lib.rs_rx_set_camera(self.buf, Camera(exposure_rows, row_seconds))
+    def set_row_time(self, seconds): self.set_camera(self.cfg.exposure_rows, seconds)
     def set_parallel_off(self): _lib.rs_rx_set_parallel(self.buf, None, None)
     @property
     def stitched(self): return _lib.rs_rx_stitched(self.buf)
@@ -311,6 +316,8 @@ class Multi:
     def __init__(self):
         self.buf = ctypes.create_string_buffer(_lib.rs_multi_sizeof())
         _lib.rs_multi_init(self.buf)
+
+    def set_camera(self, exposure_rows=0.0, row_seconds=0.0): _lib.rs_multi_set_camera(self.buf, Camera(exposure_rows, row_seconds))
 
     def process(self, bgra, t=0.0):
         import numpy as np
