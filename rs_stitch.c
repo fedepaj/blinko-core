@@ -18,8 +18,6 @@ void rs_stitch_init(rs_stitch_t *s)
 
 static void restart(rs_stitch_t *s) { s->npieces = 0; s->phead = 0; s->pieces = 0; for (int i = 0; i < RS_STITCH_N; i++) { s->acc[i] = 0; s->wgt[i] = 0; } }
 
-/* Composite of the newest pieces: newest first until every cell of the cycle has a value (or
- * the pieces run out). Returns the number of covered chips. */
 /* Agreement of a piece with the composite so far over their common cells: normalized
  * correlation, or 2 when fewer than 6 chips are common (nothing to disagree about). */
 static float agree(const rs_stitch_t *s, const rs_piece_t *pc)
@@ -102,7 +100,7 @@ static void place(rs_stitch_t *s, const float *norm, int r0, int r1, float phase
 {
     rs_piece_t *pc = &s->piece[s->phead]; s->phead = (s->phead + 1) % RS_STITCH_PIECES; if (s->npieces < RS_STITCH_PIECES) s->npieces++;
     pc->t = t; pc->phase_cells = phase_cells;
-    static float sum[RS_STITCH_N]; static int cnt[RS_STITCH_N];
+    float sum[RS_STITCH_N]; int cnt[RS_STITCH_N];          /* on the stack: the channels of a light may run on three threads */
     for (int i = 0; i < RS_STITCH_N; i++) { sum[i] = 0; cnt[i] = 0; }
     float cells_per_row = (float)RS_STITCH_RES / rpc;
     for (int r = r0; r < r1; r++) { int c = (int)fmodp_(phase_cells + ((float)r + 0.5f) * cells_per_row, (float)RS_STITCH_N); sum[c] += norm[r]; cnt[c]++; }
@@ -205,13 +203,13 @@ int rs_stitch_feed(rs_stitch_t *s, const rs_stitch_in_t *in, rs_packet_t *out)
                 float cs = guess * (1.0f + 0.0002f * (float)step);
                 float res[8];
                 for (int k = 0; k < s->anc_n; k++) { int i = (i0 + k) % 8; res[k] = fmodp_(s->anc_phase[i] - (s->anc_t[i] - s->anc_t[i0]) / cs, (float)RS_PKT_CHIPS); }
-                int in = 0; float sq = 0;
+                int inliers = 0; float sq = 0;
                 for (int j = 0; j < s->anc_n; j++) {
-                    int cnt = 0; float sq_j = 0;
-                    for (int k = 0; k < s->anc_n; k++) { float d = fmodp_(res[k] - res[j] + 41.0f, (float)RS_PKT_CHIPS) - 41.0f; if (fabsf_(d) < 2.5f) { cnt++; sq_j += d * d; } }
-                    if (cnt > in || (cnt == in && sq_j < sq)) { in = cnt; sq = sq_j; }
+                    int agreeing = 0; float sq_j = 0;
+                    for (int k = 0; k < s->anc_n; k++) { float d = fmodp_(res[k] - res[j] + 41.0f, (float)RS_PKT_CHIPS) - 41.0f; if (fabsf_(d) < 2.5f) { agreeing++; sq_j += d * d; } }
+                    if (agreeing > inliers || (agreeing == inliers && sq_j < sq)) { inliers = agreeing; sq = sq_j; }
                 }
-                if (in > best_in || (in == best_in && sq < best_sq - 1e-3f)) { best_in = in; best_sq = sq; best_cs = cs; }
+                if (inliers > best_in || (inliers == best_in && sq < best_sq - 1e-3f)) { best_in = inliers; best_sq = sq; best_cs = cs; }
             }
             int need = s->anc_n >= 4 ? s->anc_n - 1 : s->anc_n;        /* one outlier allowed from 4 anchors on */
             if (s->anc_n >= 3 && best_in >= need) { s->chip_seconds = best_cs; s->chip_seconds_locked = 1; ST_DBG("  chip_seconds fitted %.4g us: %d of %d anchors agree\n", best_cs * 1e6, best_in, s->anc_n); }
@@ -254,7 +252,6 @@ int rs_stitch_feed(rs_stitch_t *s, const rs_stitch_in_t *in, rs_packet_t *out)
              * chips per turn. The offset that best fits the composite (without the previous piece,
              * which the chain already agrees with) measures it; the clock is corrected and the
              * chain restarted at the new clock (its pieces were laid out at the old one). */
-            int skip_prev = 1; (void)skip_prev;
             float bc = -2, bpc = bestpc; int w = 12 * RS_STITCH_RES;
             compose(s, t, 1);                                           /* composite of everything but the previous piece */
             for (int d = -w; d <= w; d++) { float c = match(s, norm, r0, r1, bestpc + (float)d, rpc); if (c > bc) { bc = c; bpc = bestpc + (float)d; } }
@@ -302,7 +299,7 @@ int rs_stitch_feed(rs_stitch_t *s, const rs_stitch_in_t *in, rs_packet_t *out)
 decode:;
     /* lay the cycle out twice as a profile at RS_STITCH_RES rows per chip and decode it; if
      * that fails, once more without the newest piece (it may already belong to the next packet) */
-    static float prof[2 * RS_STITCH_N];
+    float prof[2 * RS_STITCH_N];
     /* the composite carries the camera's exposure smear (in chips: exposure rows / rows per chip)
      * plus about half a chip of placement blur; the detector's templates must match it */
     float e_chips = (cfg->exposure_rows > 0 ? cfg->exposure_rows / rpc : 0.5f) + 0.5f;

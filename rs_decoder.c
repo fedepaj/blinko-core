@@ -7,32 +7,33 @@
  * Pipeline (rs_decode_profile):
  *   1. Candidates, at every plausible scale (2..28 rows per chip): the profile is envelope-
  *      normalized for that scale (sliding min/max over 15 chips: the blob changes brightness
- *      several-fold along a packet), then two sync finders run — the binarized runs (a run of
- *      RS_SYNC_ON_CHIPS is a run-length violation of the code, data runs are 3..8 chips) and a
- *      correlation with the exposure-smeared sync template at 0.7x..1.3x of the scale (survives
- *      the chatter of half-height pulses that breaks the runs). Candidates are ranked globally.
- *   2. Validation, per candidate (no detector run spent): refine_clock() places the template;
- *      sync_on_rows() measures the ON run between its two 0.5-crossings — it must be 10 chips
- *      +-15 % (this rejects the blob's own bright edge posing as a sync) and it *is* the clock
- *      estimate (two edges 10 chips apart beat any correlation grid); the 5 chips before the gap
- *      must contain a bright chip (a real gap follows modulated signal: the filler runs are 4
- *      chips); the exposure must be under 3 chips (flatter templates fit anything).
+ *      several-fold along a packet) and correlated with the exposure-smeared sync template at
+ *      0.7x..1.3x of the scale. Candidates are ranked globally, best correlation first.
+ *   2. Validation, per candidate (no detector run spent): sync_on_rows() measures the ON run
+ *      between its two 0.5-crossings — it must be 10 chips +-15 % (this rejects the blob's own
+ *      bright edge posing as a sync) and it *is* the clock estimate (two edges 10 chips apart
+ *      beat any correlation grid); the 5 chips before the gap must contain a bright chip (a
+ *      real gap follows modulated signal: the filler runs are 4 chips); the exposure must be
+ *      under 3 chips (flatter templates fit anything); the runs after the sync must be 3..8
+ *      chips long.
  *   3. Detection (decode_candidate -> viterbi): a Viterbi search over the RLL(2,7) encoder
  *      states (tree node, level) whose chip templates include the camera exposure smear (a box
- *      of cfg->exposure_rows rows; 1.4x and 2x of it are also tried, phones under-report).
- *      Each codeword slips by +-1 row to track timing, and the slip drives a per-survivor clock
- *      PLL (0.3 * slip / cells, clamped +-6 %), so a clock hypothesis a few percent off converges.
- *      Clock hypotheses: the receiver's confirmed clock, the sync's, +-2.5 % (+-5 % with long
- *      exposure). Early aborts at codewords 5/9/17; the best survivor is checked once against
- *      the CRC-12 and, when it passes, re-fitted on a rigid grid (rigid_mse) to reject aliases.
+ *      of cfg->exposure_rows rows; 1.4x and 2x of it are tried when the configured value does
+ *      not give a valid packet: phones under-report). Each codeword slips by +-1 row to track
+ *      timing, and the slip drives a per-survivor clock PLL (0.3 * slip / cells, clamped
+ *      +-6 %), so a clock hypothesis a few percent off converges. Clock hypotheses: the
+ *      receiver's confirmed clock, the sync's, +-2.5 % (+-5 % with long exposure). Early aborts
+ *      after 6, 10 and 18 input bits (RS_ABORT_MSE); the best survivor is checked once against the
+ *      CRC-12 and, when it passes, re-fitted on a rigid grid (rigid_mse) to reject aliases.
  *   4. Framing beyond the sync: when the packet after the sync does not fit the blob, its tail
  *      is read one period earlier (cyclic decode: the transmitter may repeat packets, the seam
  *      sits half a normalization window before the blob's fade); and the packet *before* the
  *      sync is decoded too (backward: its data field ends at this gap and takes clock and phase
  *      from this sync). Every complete data field in the blob is read from the nearest sync.
  *
- * The budget is 24 detector runs per profile without a confirmed clock, 6 with one. Quality is
- * 1 / (1 + 30 * mean squared error per row) of the normalized profile; cfg->min_quality gates.
+ * The budget is 24 validated candidates per profile without a confirmed clock, 6 with one.
+ * Quality is 1 / (1 + 30 * mean squared error per row) of the normalized profile;
+ * cfg->min_quality gates.
  * History: the v2 decoder thresholded the envelope-normalized profile, found the 4+4-chip
  * Manchester sync by run lengths and decided bits from the two half-bit integrals with a
  * mid-bit PLL, retrying a failed CRC with the receiver's clock and +-3 %. It stopped working
@@ -41,12 +42,20 @@
  * for the v3 line code are in rs_proto.h. Steps 2 and 4 above and the clock PLL came from a
  * second pass on real Samsung RAW profiles (October 2026), where a brute-force decode at the
  * true clock succeeded while the detector produced no candidate within 7 % of it.
+ * A third pass (October 2026) measured every step by ablation, on the simulator's sweep and
+ * on 23 recorded clips of an iPhone 14 and a Samsung S21 FE whose packets could be checked
+ * against the texts the boards were sending (3412 true distinct packets with the code as it
+ * was). Two steps contributed nothing and were removed: a second sync finder on the binarized
+ * profile's runs (the correlation found every sync it found) and a +-8 % clock refinement by
+ * correlation before the validation (sync_on_rows measures the clock again right after it).
+ * The exposure retries used to run for every candidate; skipping them when the configured
+ * exposure already gives a valid CRC changed no packet. Together: +3 % packets, -16 % time.
  * Freestanding C99: no libc, static scratch buffers, no allocation. -DRS_DEC_DEBUG traces the
  * candidates and hypotheses on stderr and keeps timing counters (rs_decode_debug_counters).
  */
 #include "rs_decoder.h"
 
-/* The decoder keeps its scratch (about 150 KB) in file-scope buffers: no allocation, and one
+/* The decoder keeps its scratch (about 100 KB) in file-scope buffers: no allocation, and one
  * decode at a time per thread. With RS_DEC_THREADS defined they become thread-local, so the
  * receiver's channels can be decoded on several threads at once (rs_rx_t.parallel); each thread
  * that decodes then owns a copy. Platforms without threads leave it undefined. */
@@ -56,17 +65,23 @@
 #define RS_TLS
 #endif
 
-typedef struct { uint8_t level; int start; int len; } rs_run_t;
-
 static RS_TLS float    s_norm[RS_DEC_MAX_ROWS];      /* envelope-normalized profile, 0..1 */
 static RS_TLS float    s_amp[RS_DEC_MAX_ROWS];       /* local amplitude (envelope max - min) */
 static RS_TLS float    s_emin[RS_DEC_MAX_ROWS], s_emax[RS_DEC_MAX_ROWS];
 static RS_TLS uint8_t  s_bin[RS_DEC_MAX_ROWS];       /* 0/1, 2 = too little contrast */
 static RS_TLS int      s_deque[RS_DEC_MAX_ROWS];
-static RS_TLS rs_run_t s_runs[RS_DEC_MAX_ROWS + 1];
 static RS_TLS float    s_prep_rpc = -1.0f;
 static RS_TLS const float *s_prep_p = 0;
 static RS_TLS int      s_prep_n = 0;
+/* Which rs_decode_profile call the normalization above was made for: the thread that made the
+ * call (the address of its own s_norm) and that thread's call count. The profile pointer, its
+ * length and the scale are not enough to tell: receivers hand in the same buffers frame after
+ * frame, so a worker thread that outlives a frame (a GCD pool) would take its normalization of
+ * an earlier frame for this one's and decode stale rows. With a persistent three-thread pool
+ * that cost 16 % of the detector's packets, and nothing with threads created per call. */
+static RS_TLS const void *s_prep_owner = 0;
+static RS_TLS unsigned  s_prep_call = 0;
+static RS_TLS unsigned  s_calls = 0;
 
 #ifdef RS_DEC_DEBUG
 #include <stdio.h>
@@ -83,13 +98,15 @@ void rs_dec_cfg_default(rs_dec_cfg_t *cfg)
 {
     cfg->min_rows_per_chip = 1.2f;
     cfg->max_rows_per_chip = 30.0f;
-    cfg->sync_tol = 0.30f;
     cfg->min_contrast = 6.0f;
     cfg->track_timing = 1;
-    cfg->min_quality = 0.4f;          /* 1/(1+30 mse per row): true packets ~0.6-0.9, false accepts below ~0.3 */
+    /* 1/(1+30 mse per row). True packets of a clean light score 0.6-0.95, those of a saturated
+     * or distant one go down to 0.4; false accepts were measured at 0.42-0.71 on recorded clips,
+     * so the gate removes few of them (the message CRCs do that) and a higher one costs packets:
+     * 0.5 lost 6 % of the true packets of a distant light, 0.6 lost 23 %. */
+    cfg->min_quality = 0.4f;
     cfg->rows_per_chip_hint = 0.0f;
     cfg->timing_retries = 1;
-    cfg->grid_decode = 1;
     cfg->exposure_rows = 0.0f;
 }
 
@@ -135,7 +152,7 @@ static void prepare(const float *p, int n, float rpc, float min_contrast)
         if (a >= min_contrast) { s_norm[r] = (p[r] - s_emin[r]) / a; s_bin[r] = s_norm[r] >= 0.5f ? 1 : 0; }
         else { s_norm[r] = 0.5f; s_bin[r] = 2; }
     }
-    s_prep_rpc = rpc; s_prep_p = p; s_prep_n = n;
+    s_prep_rpc = rpc; s_prep_p = p; s_prep_n = n; s_prep_owner = 0;    /* no call yet: the caller tags it */
 }
 
 /* Sub-row position where the normalized profile crosses 0.5 between rows a and a+1
@@ -158,6 +175,13 @@ static float crossing(int a, int n)
  * chips), divided by E. Chips before the codeword come from the survivor's history. */
 #define RS_HIST 8
 #define RS_Q_SCALE 30.0f            /* quality = 1 / (1 + 30 * mean squared error per row of the normalized profile) */
+/* Early abort of a detector run: the mean squared error per row of the best survivor after 6, 10
+ * and 18 input bits. It is a cost limit, not a quality gate (cfg->min_quality is, on the whole
+ * packet): the first codewords fit worse than the rest while the survivor's clock PLL is still
+ * converging, so a tight limit throws away packets that would pass. It used to be derived from
+ * min_quality (0.075 at the default 0.4) and removed about one true packet in six; without any
+ * abort the 23 recorded clips gave +18 % packets for +49 % time, at 0.15 +16 % for +21 %. */
+#define RS_ABORT_MSE 0.15f
 static float tmpl_level(float x, float e, const uint8_t *hist, const uint8_t *cw, int k)
 {
     if (e < 0.02f) {                                    /* no smear: the chip under x */
@@ -180,7 +204,7 @@ static float tmpl_level(float x, float e, const uint8_t *hist, const uint8_t *cw
 
 /* ---- Viterbi over the RLL(2,7) encoder states */
 typedef struct {
-    uint8_t  valid, node, level, nbits, nhist_unused;
+    uint8_t  valid, node, level, nbits;
     int      ncells;
     float    metric, pos, rpc;                    /* rpc: the survivor's own clock estimate (slip-driven PLL) */
     uint64_t bits;
@@ -201,13 +225,18 @@ static void merge(surv_t *dst, const surv_t *c)
 /* Detect RS_DATA_BITS bits starting at row `start` (true start of the first data chip) with
  * chip length rpc (rows) and exposure e (chips). Returns 1 and the bits / mean squared error /
  * end row when a full packet fits, 0 otherwise. */
-static int   s_cnt[12];                          /* debug counters: 0 viterbi calls, 1 candidates run, 2 cyclic calls, 3 backward calls, 4 exposure retries, 5 early aborts, 6 viterbi us, 7 total us, 8 candidate-collection us, 9 refine us */
+/* Debug counters (RS_DEC_DEBUG builds only; shared by every thread, so approximate when the
+ * candidates run in parallel): 0 viterbi calls, 1 candidates run, 2 cyclic calls, 3 backward
+ * calls, 4 exposure retries, 5 early aborts, 6 viterbi us, 7 total us, 8 candidate-collection us. */
+static int   s_cnt[12];
 #ifdef RS_DEC_DEBUG
 #include <time.h>
 static long now_us_(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (long)ts.tv_sec * 1000000L + ts.tv_nsec / 1000L; }
+#define RS_COUNT(idx) (s_cnt[idx]++)
 #define RS_TIMER(var) long var = now_us_()
 #define RS_TIMED(idx, var) s_cnt[idx] += (int)(now_us_() - var)
 #else
+#define RS_COUNT(idx) ((void)0)
 #define RS_TIMER(var) ((void)0)
 #define RS_TIMED(idx, var) ((void)0)
 #endif
@@ -220,7 +249,7 @@ static int viterbi(int n, float start, float rpc, float e, float slip_chips, flo
 {
     surv_t cur[12], nxt[12];
     RS_TIMER(tv0);
-    s_cnt[0]++; if (s_period_rows) s_cnt[2]++;
+    RS_COUNT(0); if (s_period_rows) RS_COUNT(2);
     s_rpc_cur = rpc;
     for (int i = 0; i < 12; i++) cur[i].valid = 0;
     surv_t s0; s0.valid = 1; s0.node = 0; s0.level = 0; s0.nbits = 0; s0.ncells = 0; s0.metric = 0; s0.pos = start; s0.bits = 0; s0.rpc = rpc;
@@ -257,14 +286,14 @@ static int viterbi(int n, float start, float rpc, float e, float slip_chips, flo
                 /* at many rows per chip the template is evaluated once per ds rows against the
                  * profile's mean over those rows (the exposure smear is wider than that anyway) */
                 int ds = srpc >= 6.0f ? (int)(srpc / 4.0f + 0.5f) : 1; if (ds < 1) ds = 1; if (ds > 8) ds = 8;
-                int nb = rows / ds;
-                for (int j = 0; j < nb; j++) tmpl[j] = tmpl_level(((float)(a0 + j * ds) + 0.5f * (float)ds - s->pos) / srpc, e, s->hist, cw, k);
+                int nt = rows / ds;                                                        /* template samples */
+                for (int j = 0; j < nt; j++) tmpl[j] = tmpl_level(((float)(a0 + j * ds) + 0.5f * (float)ds - s->pos) / srpc, e, s->hist, cw, k);
                 for (int sh = -S; sh <= S; sh++) {
                     float err = 0;
-                    if (ds == 1) { for (int j = 0; j < nb; j++) { float d = prof_at(a0 + sh + j) - tmpl[j]; err += d * d; } }
+                    if (ds == 1) { for (int j = 0; j < nt; j++) { float d = prof_at(a0 + sh + j) - tmpl[j]; err += d * d; } }
                     else {
                         float inv = 1.0f / (float)ds;
-                        for (int j = 0; j < nb; j++) { float m = 0; int r0 = a0 + sh + j * ds; for (int q = 0; q < ds; q++) m += prof_at(r0 + q); float d = m * inv - tmpl[j]; err += d * d; }
+                        for (int j = 0; j < nt; j++) { float m = 0; int r0 = a0 + sh + j * ds; for (int q = 0; q < ds; q++) m += prof_at(r0 + q); float d = m * inv - tmpl[j]; err += d * d; }
                         err *= (float)ds;                                                          /* per-row scale, as with ds == 1 */
                     }
                     err += 0.02f * (float)(sh < 0 ? -sh : sh);
@@ -286,7 +315,7 @@ static int viterbi(int n, float start, float rpc, float e, float slip_chips, flo
         if (step == 5 || step == 9 || step == 17) {        /* early abort: a false sync or a wrong clock shows in the first codewords */
             float best = -1;
             for (int i = 0; i < 12; i++) if (cur[i].valid && cur[i].ncells >= 12 && (best < 0 || per_cell(&cur[i]) < best)) best = per_cell(&cur[i]);
-            if (best > abort_mse) { s_cnt[5]++; RS_TIMED(6, tv0); return 0; }
+            if (best > abort_mse) { RS_COUNT(5); RS_TIMED(6, tv0); return 0; }
         }
     }
     const surv_t *best = 0;
@@ -305,6 +334,15 @@ static int viterbi(int n, float start, float rpc, float e, float slip_chips, flo
 }
 
 
+
+/* The 18 field bits and the CRC-12 of a detector result (RS_DATA_BITS bits, fields first). */
+static uint8_t  bits_id(uint32_t bits)      { return (uint8_t)(bits >> (RS_CRC_BITS + RS_SEED_BITS + RS_PAYLOAD_BITS)); }
+static uint16_t bits_seed(uint32_t bits)    { return (uint16_t)((bits >> (RS_CRC_BITS + RS_PAYLOAD_BITS)) & RS_SEED_MASK); }
+static uint8_t  bits_payload(uint32_t bits) { return (uint8_t)((bits >> RS_CRC_BITS) & 0xFFu); }
+static int bits_crc_ok(uint32_t bits)
+{
+    return rs_crc_fields(bits_id(bits), bits_seed(bits), bits_payload(bits)) == (uint16_t)(bits & ((1u << RS_CRC_BITS) - 1u));
+}
 
 /* Length of the sync's ON run measured on the normalized profile: the 0.5-crossings nearest to
  * where the candidate puts the rising and the falling edge (searched within +-1.5 chips). A
@@ -341,8 +379,7 @@ static float sync_on_rows(int n, float t_rise, float rpc, float *rise_out)
 static float rigid_mse(int n, uint32_t bits, float start, float end, int ncells, float e_rows)
 {
     uint8_t chips[RS_PKT_CHIPS];
-    uint32_t f = bits >> RS_CRC_BITS;
-    rs_encode_packet((uint8_t)(f >> (RS_SEED_BITS + RS_PAYLOAD_BITS)), (uint16_t)((f >> RS_PAYLOAD_BITS) & RS_SEED_MASK), (uint8_t)(f & 0xFFu), chips);
+    rs_encode_packet(bits_id(bits), bits_seed(bits), bits_payload(bits), chips);
     const uint8_t *data = chips + RS_SYNC_CHIPS;             /* the data field, preceded by the sync's OFF chips */
     static const uint8_t off_hist[RS_HIST] = { 0 };
     if (ncells < 20 || ncells > RS_DATA_CHIPS) return 1.0f;
@@ -363,9 +400,38 @@ static float rigid_mse(int n, uint32_t bits, float start, float end, int ncells,
     return best < 0 ? 1.0f : best;
 }
 
-/* One sync candidate: rising edge of the ON run at t0 (rows, 0.5-crossing), chip length rpc.
- * Chip-clock hypotheses, ML detection, one CRC check. */
+/* Does the signal repeat one packet period earlier? The cyclic decode reads a packet's tail from
+ * the previous copy, which is only there when the board repeats its packets; the receiver is
+ * not told, but where the blob shows more than one period it can see for itself: the rows
+ * after `start` are compared with those one period before them (the period is known to the
+ * clock's precision, so a few lags are tried). Returns 0 when at least 12 chips could be
+ * compared and they differ, 1 when they agree or too few rows overlap to tell (a blob about one
+ * packet tall, the case the cyclic decode is for).
+ * Without this test every sync whose packet ran past the blob cost up to five detector runs on
+ * a stream that does not repeat: on the recorded clips with one copy per packet a third of the
+ * decoder's time, for no packet. */
+static int repeats_one_period_earlier(int usable_start, int usable_end, float start, int period, float rpc)
+{
+    int margin = (int)(0.02f * (float)period) + 2;                   /* lags tried, in rows */
+    int a = iroundf_(start), b = usable_end - iroundf_(2.0f * rpc);  /* not the fade's last chips */
+    if (a - period - margin < usable_start) a = usable_start + period + margin;
+    if (b - a < iroundf_(12.0f * rpc)) return 1;
+    float best = -2.0f;
+    for (int lag = -margin; lag <= margin; lag++) {
+        float sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0; int cnt = b - a;
+        for (int r = a; r < b; r++) { float x = s_norm[r], y = s_norm[r - period + lag]; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; }
+        float vx = sxx - sx * sx / (float)cnt, vy = syy - sy * sy / (float)cnt;
+        if (vx <= 1e-4f || vy <= 1e-4f) continue;
+        float c = (sxy - sx * sy / (float)cnt) / sqrtf_(vx * vy);
+        if (c > best) best = c;
+    }
+    RS_DBG("    repeat test over rows %d..%d: correlation %.2f\n", a, b, best);
+    return best >= 0.5f;
+}
 
+/* One sync candidate: rising edge of the ON run at t0 (rows, 0.5-crossing), chip length rpc.
+ * Chip-clock hypotheses, ML detection, one CRC check. Returns 1 with a packet, 0 without, -1
+ * when the packet did not fit the blob (no detector run: the caller tries the one before). */
 static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_ref, float amp,
                             int backward, rs_packet_t *pkt, rs_dec_stats_t *st)
 {
@@ -373,8 +439,8 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
      * sync's gap begins; this sync gives it clock and phase). Sync-free framing: every complete
      * data field in the blob is read from the nearest sync, its own or the next one, so a blob
      * holding one packet length yields a packet wherever the sync fell. */
-    float e_rows = cfg->exposure_rows > 0 ? cfg->exposure_rows : 0.5f * rpc_ref;   /* measuring the exposure on the sync's edge was tried and was worse than the configured value */
-    float abort_mse = 0.9f / RS_Q_SCALE / (cfg->min_quality > 0.05f ? cfg->min_quality : 0.05f);   /* q would end below ~min_quality */
+    float e_rows = e_rows_of(cfg, rpc_ref);        /* measuring the exposure on the sync's edge was tried and was worse than the configured value */
+    float abort_mse = RS_ABORT_MSE;
     /* Clock hypotheses, tried until one passes the CRC: the receiver's confirmed clock first (the
      * most accurate estimate there is), then the sync's own (two 0.5-crossings 10 chips apart:
      * ~1 % with sharp edges, 5-8 % when a long exposure smears them into ramps, so the set widens
@@ -398,9 +464,9 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
             if (s_amp[r] < low) { if (++run >= iroundf_(0.5f * rpc_ref)) { usable_end = r - run + 1; break; } } else run = 0;
         }
     }
-    int usable_start = 0;
-    if (backward) {
-        int run = 0, a = iroundf_(t0); if (a >= n) a = n - 1;
+    int usable_start = 0, repeats = -1;            /* repeats: -1 not tested yet */
+    {
+        int run = 0, a = iroundf_(t0); if (a >= n) a = n - 1; if (a < 0) a = 0;
         float low = 0.6f * amp > cfg->min_contrast ? 0.6f * amp : cfg->min_contrast;
         for (int r = a; r >= 0; r--) {
             if (s_amp[r] < low) { if (++run >= iroundf_(0.5f * rpc_ref)) { usable_start = r + run; break; } } else run = 0;
@@ -427,13 +493,15 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
              * usable end: the envelope normalization (a 15-chip window) lags the blob's fade, so
              * the last rows before usable_end are distorted while the rows one period earlier,
              * well inside the blob, are clean. The wrapped source rows must be modulated signal. */
+            if (repeats < 0) repeats = repeats_one_period_earlier(usable_start, usable_end, start, period, rpc);
+            if (!repeats) { RS_DBG("    hyp rpc %.3f: packet past the blob and no earlier copy\n", rpc); if (c == 0) st->truncated++; continue; }
             float gap_start = t0 - 0.5f * e_rows - (float)RS_SYNC_GAP_CHIPS * rpc;
             int wrap = usable_end - iroundf_(7.5f * rpc);
             if ((float)wrap < start + 2.0f * rpc) wrap = iroundf_(start + 2.0f * rpc);
             if (wrap > usable_end) wrap = usable_end;
             int src0 = wrap - period, src1 = iroundf_(need) - period;      /* wrapped source rows */
             float low = 0.6f * amp > cfg->min_contrast ? 0.6f * amp : cfg->min_contrast;
-            if (src0 < 0 || src1 > iroundf_(gap_start) + 1 || s_amp[src0] < low || s_amp[(src0 + src1) / 2] < low || s_amp[src1 > 0 ? src1 - 1 : 0] < low) {
+            if (src0 < 4 || src1 > iroundf_(gap_start) + 1 ||      /* 4: the period offsets tried below read up to 4 rows before src0 */ s_amp[src0] < low || s_amp[(src0 + src1) / 2] < low || s_amp[src1 > 0 ? src1 - 1 : 0] < low) {
                 RS_DBG("    hyp rpc %.3f: truncated (need %.0f usable_end %d src %d..%d)\n", rpc, need, usable_end, src0, src1); if (c == 0) st->truncated++; continue;
             }
             s_wrap_at = wrap; s_period_rows = period;
@@ -453,23 +521,21 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
                 if (d == 0 && !r2) break;                  /* aborted at the nominal period: nothing packet-like here, the seam cannot fix that */
                 if (!r2) continue;
                 if (!ok || m2 < bm) { ok = 1; bm = m2; bb = b2; be = e2; bp = s_vit_rpc; bn = s_vit_ncells; }
-                uint32_t f2 = b2 >> RS_CRC_BITS;           /* a valid CRC ends the search: the other offsets cannot do better than right */
-                if (rs_crc_fields((uint8_t)(f2 >> (RS_SEED_BITS + RS_PAYLOAD_BITS)), (uint16_t)((f2 >> RS_PAYLOAD_BITS) & RS_SEED_MASK), (uint8_t)(f2 & 0xFFu)) == (uint16_t)(b2 & ((1u << RS_CRC_BITS) - 1u))) { bm = m2; bb = b2; be = e2; bp = s_vit_rpc; bn = s_vit_ncells; break; }
+                if (bits_crc_ok(b2)) { bm = m2; bb = b2; be = e2; bp = s_vit_rpc; bn = s_vit_ncells; break; }   /* a valid CRC ends the search: the other offsets cannot do better than right */
             }
             s_period_rows = period; s_vit_rpc = bp; s_vit_ncells = bn; s_vit_e = e_rows;
             if (!ok) { if (c == 0) { s_wrap_at = 1 << 30; s_period_rows = 0; return 0; } continue; }
             bits = bb; mse = bm; end = be;
         } else {
-            /* phones report less exposure than their edges show (S21 FE: 57 us set, ~76 us measured):
-             * the first clock hypothesis is also tried with 1.4x the exposure */
             int ok1 = viterbi(n, start, rpc, e_rows / rpc, (float)cfg->track_timing, abort_mse, &bits, &mse, &end);
             float pll = s_vit_rpc; int pn = s_vit_ncells; s_vit_e = e_rows;
-            if (c == 0 && cfg->exposure_rows > 0) {
-                /* phones under-report their exposure (S21 FE RAW: 57 us set, ~100 us on the edges):
-                 * the first clock hypothesis is also tried at 1.4x and 2x the configured exposure */
+            if (c == 0 && cfg->exposure_rows > 0 && !(ok1 && bits_crc_ok(bits))) {
+                /* phones under-report their exposure (S21 FE RAW: 57 us set, 76-100 us on the edges):
+                 * when the configured exposure gives no valid packet, the first clock hypothesis is
+                 * also tried at 1.4x and 2x of it and the best fit kept */
                 static const float ks[2] = { 1.4f, 2.0f };
                 for (int q = 0; q < 2; q++) {
-                    s_cnt[4]++;
+                    RS_COUNT(4);
                     uint32_t b2; float m2, e2;
                     float start2 = start - 0.5f * (ks[q] - 1.0f) * e_rows;   /* a longer exposure moves the template's origin back by half the extra smear (forward and backward alike) */
                     if (viterbi(n, start2, rpc, ks[q] * e_rows / rpc, (float)cfg->track_timing, abort_mse, &b2, &m2, &e2) && (!ok1 || m2 < mse)) { ok1 = 1; bits = b2; mse = m2; end = e2; pll = s_vit_rpc; pn = s_vit_ncells; s_vit_e = ks[q] * e_rows; start = start2; }
@@ -478,11 +544,9 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
             s_vit_rpc = pll; s_vit_ncells = pn;
             if (!ok1) { if (c == 0) return 0; continue; }
         }
-        uint32_t f = bits >> RS_CRC_BITS;
         RS_DBG("    hyp rpc %.3f start %.1f%s%s: mse %.4f q %.2f  fields id %u seed %u payload %u (usable_end %d, wrap %d, period %d, ncells %d, end %.0f)\n", rpc, start, s_period_rows ? " cyclic" : "", backward ? " backward" : "", mse, 1.0f / (1.0f + RS_Q_SCALE * mse),
-               (unsigned)(f >> (RS_SEED_BITS + RS_PAYLOAD_BITS)), (unsigned)((f >> RS_PAYLOAD_BITS) & RS_SEED_MASK), (unsigned)(f & 0xFFu), usable_end, s_wrap_at, s_period_rows, s_vit_ncells, end);
-        int ok = rs_crc_fields((uint8_t)(f >> (RS_SEED_BITS + RS_PAYLOAD_BITS)), (uint16_t)((f >> RS_PAYLOAD_BITS) & RS_SEED_MASK), (uint8_t)(f & 0xFFu))
-                 == (uint16_t)(bits & ((1u << RS_CRC_BITS) - 1u));
+               (unsigned)bits_id(bits), (unsigned)bits_seed(bits), (unsigned)bits_payload(bits), usable_end, s_wrap_at, s_period_rows, s_vit_ncells, end);
+        int ok = bits_crc_ok(bits);
         if (ok) {
             float rm = rigid_mse(n, bits, start, end, s_vit_ncells, s_vit_e > 0 ? s_vit_e : e_rows);
             RS_DBG("    crc ok: rigid mse %.4f vs %.4f\n", rm, mse);
@@ -497,10 +561,9 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
     if (!crc_ok) { if (best_mse >= 0) st->crc_fail++; return ran ? 0 : -1; }
     float q = 1.0f / (1.0f + RS_Q_SCALE * best_mse);
     if (q < cfg->min_quality) { st->crc_fail++; return 0; }
-    uint32_t fields = best_bits >> RS_CRC_BITS;
-    pkt->id = (uint8_t)(fields >> (RS_SEED_BITS + RS_PAYLOAD_BITS));
-    pkt->seed = (uint16_t)((fields >> RS_PAYLOAD_BITS) & RS_SEED_MASK);
-    pkt->payload = (uint8_t)(fields & 0xFFu);
+    pkt->id = bits_id(best_bits);
+    pkt->seed = bits_seed(best_bits);
+    pkt->payload = bits_payload(best_bits);
     pkt->row_start = t0 - 0.5f * e_rows - (float)RS_SYNC_GAP_CHIPS * best_rpc - (backward ? (float)RS_PKT_CHIPS * best_rpc : 0.0f);
     pkt->row_end = best_end;
     pkt->rows_per_chip = best_pll;                 /* the PLL's clock: hypothesis + what the slips corrected */
@@ -511,12 +574,11 @@ static int decode_candidate(int n, const rs_dec_cfg_t *cfg, float t0, float rpc_
 }
 
 /* ---- sync search by correlation with the exposure-smeared sync template.
- * Run-length syncs break down once the exposure smears the 3-chip gaps (E/T > ~1): the
- * normalized profile chatters around 0.5. Correlating the whole [gap][on][off] shape against
- * the profile is robust to that, and trying a few chip lengths around the scale gives the
- * clock to ~3 %, which the detector's hypotheses then refine. */
+ * The whole [gap][on][off] shape is correlated against the normalized profile: unlike the runs
+ * of the binarized profile it survives the chatter around 0.5 that a long exposure (E/T > ~1)
+ * or the blob's brightness gradient makes of the 3-chip gaps. Trying a few chip lengths around
+ * the scale places the sync; its clock is then measured on the ON run's edges (sync_on_rows). */
 #define RS_MAX_CAND 6
-#define RS_CAND_BUDGET 16          /* detector runs per profile, across scales */
 typedef struct { float x, rpc, c; } cand_t;
 static RS_TLS float s_tmpl[512];
 
@@ -530,7 +592,7 @@ static void add_cand(cand_t *cands, int *nc, float x, float rpc, float c)
     if (c > cands[w].c) { cands[w].x = x; cands[w].rpc = rpc; cands[w].c = c; }
 }
 
-static int sync_correlate(int n, const rs_dec_cfg_t *cfg, float rpc, float e_rows, cand_t *cands, int *nc)
+static int sync_correlate(int n, float rpc, float e_rows, cand_t *cands, int *nc)
 {
     static const uint8_t sync_chips[RS_SYNC_CHIPS] = { 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0 };
     static const uint8_t dark[RS_HIST] = { 0 };
@@ -561,136 +623,57 @@ static int sync_correlate(int n, const rs_dec_cfg_t *cfg, float rpc, float e_row
     return found;
 }
 
-/* Sync candidates from the binarized profile's runs: [OFF >= 2 chips][ON ~10][OFF >= 2], the ON
- * run's two 0.5-crossings giving the chip length. Cheap and precise while the exposure keeps
- * the edges sharp (E below ~1.2 chips); with longer exposures the correlation path is used. */
-static int sync_runs(int n, const rs_dec_cfg_t *cfg, float rpc_hint, cand_t *cands, int *nc)
-{
-    int nr = 0;
-    for (int r = 0; r < n; r++) {
-        if (nr > 0 && s_runs[nr - 1].level == s_bin[r]) { s_runs[nr - 1].len++; continue; }
-        s_runs[nr].level = s_bin[r]; s_runs[nr].start = r; s_runs[nr].len = 1; nr++;
-    }
-    int found = 0;
-    for (int i = 1; i + 1 < nr; i++) {
-        if (s_runs[i - 1].level != 0 || s_runs[i].level != 1 || s_runs[i + 1].level != 0) continue;
-        int a0 = s_runs[i].start, a1 = s_runs[i + 1].start;
-        float t_rise = crossing(a0 - 1, n), t_fall = crossing(a1 - 1, n);
-        float rpc = (t_fall - t_rise) / (float)RS_SYNC_ON_CHIPS;
-        if (rpc < cfg->min_rows_per_chip || rpc > cfg->max_rows_per_chip) continue;
-        if (rpc < rpc_hint * 0.7f || rpc > rpc_hint * 1.3f) continue;
-        if (cfg->rows_per_chip_hint > 0 && fabsf_(rpc - cfg->rows_per_chip_hint) > 0.12f * cfg->rows_per_chip_hint) continue;
-        float e_rows = e_rows_of(cfg, rpc);
-        float min_off = (float)(RS_SYNC_GAP_CHIPS - 1) * rpc * (1.0f - cfg->sync_tol);
-        if ((float)s_runs[i - 1].len < min_off || (float)s_runs[i + 1].len < min_off) continue;
-        /* run-length validation inside the packet: every run 3..8 chips of this clock */
-        float lo = (float)RS_RLL_MIN_RUN * rpc * 0.75f, hi = (float)RS_RLL_MAX_RUN * rpc * 1.15f + e_rows;
-        float end = t_rise + (float)(RS_SYNC_ON_CHIPS + RS_SYNC_OFF_CHIPS + RS_DATA_CHIPS) * rpc;
-        int bad = 0;
-        for (int j = i + 2; j < nr && (float)s_runs[j].start < end - 2.0f * rpc; j++) {
-            if (s_runs[j].level == 2) break;
-            float L = (float)s_runs[j].len;
-            if (L < lo || L > hi) { bad = 1; break; }
-        }
-        if (bad) continue;
-        float x = t_rise - 0.5f * e_rows - (float)RS_SYNC_GAP_CHIPS * rpc;   /* true start of the gap, template coordinates */
-        /* rank: closest to the scale's own chip length first (a data run seen at a wrong scale
-         * lands off-centre), so the budget goes to the plausible syncs */
-        float dev = fabsf_(rpc / rpc_hint - 1.0f);
-        add_cand(cands, nc, x, rpc, 0.95f - 0.5f * dev);
-        found++;
-    }
-    return found;
-}
-
-/* candidates from one scale: normalization at that scale, then runs (short exposure) or
- * correlation at a few chip lengths (long exposure) */
+/* candidates from one scale: normalization at that scale, then the correlation at a few chip
+ * lengths around it (three around the receiver's clock when it has one); add_cand merges
+ * duplicates */
 static void collect_scale(const float *p, int n, const rs_dec_cfg_t *cfg, float rpc_hint, cand_t *cands, int *nc)
 {
     prepare(p, n, rpc_hint, cfg->min_contrast);
     float e_rows = e_rows_of(cfg, rpc_hint);
-    /* both sync finders at every scale: the runs give a precise clock when the binarized profile
-     * is clean, the correlation survives chatter (half-height pulses from a long exposure or
-     * from the blob's brightness gradient); add_cand merges duplicates */
-    sync_runs(n, cfg, rpc_hint, cands, nc);
     if (cfg->rows_per_chip_hint > 0) {
         float h = cfg->rows_per_chip_hint;
-        sync_correlate(n, cfg, h, e_rows, cands, nc); sync_correlate(n, cfg, h * 0.97f, e_rows, cands, nc); sync_correlate(n, cfg, h * 1.03f, e_rows, cands, nc);
+        sync_correlate(n, h, e_rows, cands, nc); sync_correlate(n, h * 0.97f, e_rows, cands, nc); sync_correlate(n, h * 1.03f, e_rows, cands, nc);
     } else {
         for (int k = -2; k <= 2; k++) {
             float rpc = rpc_hint * (1.0f + 0.15f * (float)k);            /* 0.7x .. 1.3x of the scale */
             if (rpc < cfg->min_rows_per_chip || rpc > cfg->max_rows_per_chip) continue;
             if ((float)RS_PKT_CHIPS * rpc * 0.7f > (float)n) continue;   /* a packet would not fit the profile */
-            sync_correlate(n, cfg, rpc, e_rows_of(cfg, rpc), cands, nc);
+            sync_correlate(n, rpc, e_rows_of(cfg, rpc), cands, nc);
         }
     }
 }
 
-/* Local clock refinement: the correlation finds syncs on a 15 % clock grid, the detector's
- * hypotheses only span +-2.5 %, so the gap is closed here by correlating the smeared sync
- * template at fine clock steps (+-8 % in 1 % steps) and a few row offsets around the
- * candidate. Returns the best (x, rpc); undecimated, the template is short. */
-static void refine_clock(int n, const rs_dec_cfg_t *cfg, float *x_io, float *rpc_io)
-{
-    static const uint8_t sync_chips[RS_SYNC_CHIPS] = { 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0 };
-    static const uint8_t dark[RS_HIST] = { 0 };
-    float best_c = -2, best_x = *x_io, best_rpc = *rpc_io;
-    for (int k = -8; k <= 8; k += 2) {                 /* 2 % steps: the sync's ON run then gives the clock to ~1 %, this only has to place the edges */
-        float rpc = *rpc_io * (1.0f + 0.01f * (float)k);
-        if (rpc < cfg->min_rows_per_chip || rpc > cfg->max_rows_per_chip) continue;
-        float e = e_rows_of(cfg, rpc) / rpc;
-        int L = iroundf_((float)RS_SYNC_CHIPS * rpc);
-        if (L < 8 || L > 512) continue;
-        float mean = 0;
-        for (int r = 0; r < L; r++) { s_tmpl[r] = tmpl_level(((float)r + 0.5f) / rpc, e, dark, sync_chips, RS_SYNC_CHIPS); mean += s_tmpl[r]; }
-        mean /= (float)L;
-        float tn = 0; for (int r = 0; r < L; r++) { s_tmpl[r] -= mean; tn += s_tmpl[r] * s_tmpl[r]; }
-        if (tn < 1e-6f) continue;
-        /* the gap start moves with the clock so that the ON run's centre stays put */
-        float centre = *x_io + ((float)RS_SYNC_GAP_CHIPS + 0.5f * (float)RS_SYNC_ON_CHIPS) * *rpc_io;
-        int x0 = iroundf_(centre - ((float)RS_SYNC_GAP_CHIPS + 0.5f * (float)RS_SYNC_ON_CHIPS) * rpc);
-        int span = (int)(0.3f * rpc) + 2;
-        for (int x = x0 - span; x <= x0 + span; x++) {
-            if (x < 0 || x + L > n) continue;
-            float sum = 0, sq = 0, dot = 0;
-            for (int r = 0; r < L; r++) { float v = s_norm[x + r]; sum += v; sq += v * v; dot += v * s_tmpl[r]; }
-            float wm = sum / (float)L, var = sq - (float)L * wm * wm;
-            if (var <= 1e-4f) continue;
-            float c = (dot - wm * 0.0f) / sqrtf_(var * tn);   /* template is zero-mean: dot already centred */
-            if (c > best_c) { best_c = c; best_x = (float)x; best_rpc = rpc; }
-        }
-    }
-    if (best_c > -1) { *x_io = best_x; *rpc_io = best_rpc; }
-}
-
-/* One validated sync candidate as a unit of parallel work (see rs_decode_profile, step 4). */
+/* One validated sync candidate as a unit of parallel work (see rs_decode_profile, step 3). */
 typedef struct {
     const float *p; int n; const rs_dec_cfg_t *cfg;
     float scale, x, t0, rpc, amp;
     rs_packet_t pk[2]; int npk;                   /* the packet after the sync and the one before it */
     rs_dec_stats_t st;
+    const void *owner; unsigned call;             /* the rs_decode_profile call it belongs to (see s_prep_owner) */
 } rs_cjob_t;
 
 static void cand_job(void *ctx, int i)
 {
     rs_cjob_t *j = &((rs_cjob_t *)ctx)[i];
-    if (s_prep_p != j->p || s_prep_n != j->n || fabsf_(s_prep_rpc - j->scale) > 1e-3f) prepare(j->p, j->n, j->scale, j->cfg->min_contrast);
-    s_cnt[1]++;
+    if (s_prep_owner != j->owner || s_prep_call != j->call || s_prep_p != j->p || s_prep_n != j->n || fabsf_(s_prep_rpc - j->scale) > 1e-3f) {
+        prepare(j->p, j->n, j->scale, j->cfg->min_contrast);
+        s_prep_owner = j->owner; s_prep_call = j->call;
+    }
+    RS_COUNT(1);
     /* the packet after this sync; then the one before it, but only when this sync is trusted
      * (its packet decoded) or its own packet did not fit the blob: a sync whose packet fit and
      * failed the CRC is most likely not a sync, and every detector run on random data is a
      * 1/4096 chance of a false CRC pass */
     int fwd = decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 0, &j->pk[j->npk], &j->st);
     if (fwd == 1) j->npk++;
-    if (fwd != 0) { s_cnt[3]++; if (decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 1, &j->pk[j->npk], &j->st) == 1) j->npk++; }
+    if (fwd != 0) { RS_COUNT(3); if (decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 1, &j->pk[j->npk], &j->st) == 1) j->npk++; }
 }
 
 static RS_TLS rs_cjob_t s_jobs[24];
 static RS_TLS const float *s_last_p = 0; static RS_TLS int s_last_n = 0, s_last_nj = 0;
-/* steps 1-3: candidates at every scale, ranking, validation; returns the validated jobs */
+/* steps 1-2: candidates at every scale, ranking, validation; returns the validated jobs */
 static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_dec_stats_t *st, rs_cjob_t *jobs, int budget)
 {
-
     RS_TIMER(tc0);
     float gmin = p[0], gmax = p[0];
     for (int r = 0; r < n; r++) { if (p[r] < gmin) gmin = p[r]; if (p[r] > gmax) gmax = p[r]; }
@@ -721,7 +704,6 @@ static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_d
     for (int i = 0; i < nc && nj < budget; i++) {
         float rpc = cands[i].rpc, x = cands[i].x;
         if (s_prep_p != p || s_prep_n != n || fabsf_(s_prep_rpc - cand_scale[i]) > 1e-3f) prepare(p, n, cand_scale[i], cfg->min_contrast);
-        { RS_TIMER(tr0); refine_clock(n, cfg, &x, &rpc); RS_TIMED(9, tr0); }
         float er = e_rows_of(cfg, rpc);
         float t0 = x + (float)RS_SYNC_GAP_CHIPS * rpc + 0.5f * er;      /* where the ON run's 0.5-crossing sits */
         int dup = 0;
@@ -738,8 +720,8 @@ static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_d
              * bright edge posing as a sync (which the detector could otherwise fit at an aliased
              * clock with a valid CRC), and costs no detector run. Its length is also the best
              * clock estimate there is (two edges 10 chips apart, ~1 row each): the correlation's
-             * clock is a 15 % grid refined by a weak template fit, 5 % off at times, more than
-             * the detector's hypotheses and its PLL can take back at 15 rows/chip. */
+             * clock is a 15 % grid, more than the detector's hypotheses and its PLL can take back
+             * at 15 rows/chip. */
             float rise = t0, on = sync_on_rows(n, t0, rpc, &rise);
             RS_DBG("cand scale %.1f x %.1f rpc %.3f: ON run %.1f rows (expect %.1f)\n", cand_scale[i], x, rpc, on, (float)RS_SYNC_ON_CHIPS * rpc);
             if (on < 0 || fabsf_(on - (float)RS_SYNC_ON_CHIPS * rpc) > 0.15f * (float)RS_SYNC_ON_CHIPS * rpc) continue;   /* no edge, or the wrong length */
@@ -752,10 +734,10 @@ static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_d
              * lies within 5 chips before the gap); the blob's dark surroundings do not, and a
              * sync "found" at the blob's edge is the other source of aliased decodes */
             {
-                int a = iroundf_(x - 5.0f * rpc), b = iroundf_(x);
-                if (a < 0 || b >= n) continue;
-                float mx = p[a]; for (int r = a + 1; r < b; r++) if (p[r] > mx) mx = p[r];
-                if (mx < s_emin[b] + 0.5f * amp) continue;
+                int g0 = iroundf_(x - 5.0f * rpc), g1 = iroundf_(x);
+                if (g0 < 0 || g1 >= n) continue;
+                float mx = p[g0]; for (int r = g0 + 1; r < g1; r++) if (p[r] > mx) mx = p[r];
+                if (mx < s_emin[g1] + 0.5f * amp) continue;
             }
         }
         {
@@ -792,6 +774,7 @@ static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_d
         rs_cjob_t *j = &jobs[nj++];
         j->p = p; j->n = n; j->cfg = cfg; j->scale = cand_scale[i]; j->x = x; j->t0 = t0; j->rpc = rpc; j->amp = amp; j->npk = 0;
         j->st.syncs = j->st.crc_ok = j->st.crc_fail = j->st.truncated = 0;
+        j->owner = s_norm; j->call = s_calls;
     }
     return nj;
 }
@@ -806,16 +789,17 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     if (n < 16 || max_out <= 0) return 0;
     RS_TIMER(tt0);
     rs_cjob_t *jobs = s_jobs;                         /* per calling thread: a channel's detector may itself run on a channel thread */
+    s_calls++;
     int nj = collect_validate(p, n, cfg, st, jobs, cfg->rows_per_chip_hint > 0 ? 6 : 24);
+    s_prep_owner = s_norm; s_prep_call = s_calls;     /* what this thread has normalized is this call's */
     s_last_p = p; s_last_n = n; s_last_nj = nj;       /* for rs_decode_last_syncs */
-    if (nj < 0) return 0;
-    /* 4. detection (map): every validated candidate is independent — forward decode, then the
+    /* 3. detection (map): every validated candidate is independent — forward decode, then the
      *    packet before the sync — so they run through the platform's parallel hook when there is
      *    one (each job normalizes the profile for its own scale in its thread's scratch), else
      *    in turn on this thread. */
     if (cfg->parallel && nj > 1) cfg->parallel(cfg->parallel_user, nj, cand_job, jobs);
     else for (int i = 0; i < nj; i++) cand_job(jobs, i);
-    /* 5. reduce: statistics, then the packets deduplicated by row (best quality kept) */
+    /* 4. reduce: statistics, then the packets deduplicated by row (best quality kept) */
     int nout = 0;
     for (int i = 0; i < nj; i++) {
         st->crc_fail += jobs[i].st.crc_fail; st->truncated += jobs[i].st.truncated;
@@ -852,37 +836,36 @@ int rs_decode_syncs(const float *p, int n, const rs_dec_cfg_t *cfg, rs_sync_t *o
     rs_dec_stats_t st; st.syncs = st.crc_ok = st.crc_fail = st.truncated = 0; st.rows_per_chip = 0; st.contrast = 0;
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
     if (n < 16 || max_out <= 0) return 0;
+    s_calls++;
     int nj = collect_validate(p, n, cfg, &st, s_jobs, 24), k = 0;
+    s_prep_owner = s_norm; s_prep_call = s_calls;
     for (int i = 0; i < nj && k < max_out; i++) { out[k].x = s_jobs[i].x; out[k].rpc = s_jobs[i].rpc; out[k].amp = s_jobs[i].amp; k++; }
     return k;
 }
+
+/* Sizes of the public structures, for bindings that mirror them. */
+size_t rs_dec_cfg_sizeof(void) { return sizeof(rs_dec_cfg_t); }
+size_t rs_packet_sizeof(void) { return sizeof(rs_packet_t); }
+size_t rs_dec_stats_sizeof(void) { return sizeof(rs_dec_stats_t); }
 
 void rs_decode_normalized(const float **norm, const float **amp, int *n)
 {
     if (norm) *norm = s_norm; if (amp) *amp = s_amp; if (n) *n = s_prep_n;
 }
 
-/* Decode one packet at a known position (grid prediction): row_start is the first gap chip,
- * rpc the chip length in rows. No sync search: the ML detection and the CRC only. */
-int rs_decode_at_prepared(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
+/* Decode one packet at a known position: row_start is the first gap chip, rpc the chip length
+ * in rows. No sync search: the ML detection at that clock and the CRC only. */
+int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
 {
     rs_dec_stats_t st = { 0 };
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
     if (n < 16 || rpc <= 0) return 0;
-    if (s_prep_p != p || s_prep_n != n || fabsf_(s_prep_rpc - rpc) > 0.5f * rpc) prepare(p, n, rpc, cfg->min_contrast);
-    float e_rows = cfg->exposure_rows > 0 ? cfg->exposure_rows : 0.5f * rpc;
+    prepare(p, n, rpc, cfg->min_contrast);
+    float e_rows = e_rows_of(cfg, rpc);
     float t0 = row_start + (float)RS_SYNC_GAP_CHIPS * rpc + 0.5f * e_rows;   /* where the sync's 0.5-crossing would be */
     if (t0 < 0) return 0;
-    rs_dec_cfg_t c1 = *cfg; c1.timing_retries = 0; c1.rows_per_chip_hint = 0; cfg = &c1;   /* the clock is given: one hypothesis */
+    rs_dec_cfg_t c1 = *cfg; c1.timing_retries = 0; c1.rows_per_chip_hint = 0;   /* the clock is given: one hypothesis */
     float amp = 0; int cnt = 0, a = iroundf_(t0);
     for (int r = a; r < a + iroundf_(RS_SYNC_ON_CHIPS * rpc) && r < n; r++) { if (r >= 0) { amp += s_amp[r]; cnt++; } }
-    return decode_candidate(n, cfg, t0, rpc, cnt ? amp / (float)cnt : 0, 0, out, &st) == 1;
-}
-
-int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out)
-{
-    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
-    if (n < 16 || rpc <= 0) return 0;
-    prepare(p, n, rpc, cfg->min_contrast);
-    return rs_decode_at_prepared(p, n, cfg, row_start, rpc, out);
+    return decode_candidate(n, &c1, t0, rpc, cnt ? amp / (float)cnt : 0, 0, out, &st) == 1;
 }

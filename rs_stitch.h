@@ -1,9 +1,12 @@
 /*
  * rs_stitch.h — stroboscopic stitching: a packet read in pieces over several frames.
+ * Experimental: it works in simulation from about 40 % of a packet per frame and has not
+ * decoded a packet on a phone yet, so a receiver leaves it off unless rs_rx_t.stitch_enabled
+ * is set.
  *
  * When the lit blob is shorter than a packet (a far or small light, a 30 fps phone whose
  * readout shows a few milliseconds of each frame), no frame holds a whole packet. If the
- * transmitter repeats each packet many times (rs_tx_set_repeat, 8..64), successive frames read
+ * transmitter repeats each packet many times (rs_tx_set_repeat, tens of copies), successive frames read
  * successive pieces of the same 82-chip cycle at phases that advance by (frame period mod
  * packet period). The stitcher places each piece on the cycle, accumulates the normalized
  * brightness per chip, and hands the completed cycle to the ordinary detector.

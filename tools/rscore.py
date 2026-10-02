@@ -9,8 +9,8 @@ SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "r
 RS_PKT_CHIPS = 82
 RS_NUM_SLOTS = 8
 RS_MSG_MAX_LEN = 31
-RS_SEED_META = 511
-RS_SEED_META_PACKED = 510
+RS_SEED_META = 127
+RS_SEED_META_PACKED = 126
 RS_TEXT_MAX = 64
 LEVELS = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL", "STATUS", "FAULT", "RSVD"]
 
@@ -42,15 +42,16 @@ class Tx(ctypes.Structure):
                 ("round", ctypes.c_uint8 * (RS_NUM_SLOTS * 4)), ("fault_weight", ctypes.c_uint8), ("round_len", ctypes.c_uint8), ("round_pos", ctypes.c_uint8),
                 ("cur", Slot), ("cur_id", ctypes.c_uint8), ("cur_sent", ctypes.c_uint8), ("visit_len", ctypes.c_uint8),
                 ("burst_on", ctypes.c_uint32), ("burst_off", ctypes.c_uint32), ("burst_pos", ctypes.c_uint32), ("in_pause", ctypes.c_uint8),
-                ("nchan", ctypes.c_uint8), ("pilot_period", ctypes.c_uint32), ("pilot_pos", ctypes.c_uint32), ("in_pilot", ctypes.c_uint8), ("pilot_idx", ctypes.c_uint32),
-                ("chips", (ctypes.c_uint8 * RS_PKT_CHIPS) * 3), ("chip_pos", ctypes.c_uint8 * 3), ("packets_sent", ctypes.c_uint32),
-                ("repeat", ctypes.c_uint8), ("rep_left", ctypes.c_uint8 * 3)]
+                ("nchan", ctypes.c_uint8), ("pilot_period", ctypes.c_uint32), ("pilot_next", ctypes.c_uint32), ("pilot_count", ctypes.c_uint32), ("pilot_pos", ctypes.c_uint32), ("in_pilot", ctypes.c_uint8), ("pilot_idx", ctypes.c_uint32),
+                ("chips", ((ctypes.c_uint8 * RS_PKT_CHIPS) * 3) * 2), ("air", ctypes.c_uint8), ("next_ready", ctypes.c_uint8), ("preparing", ctypes.c_uint8),
+                ("chip_pos", ctypes.c_uint8 * 3), ("packets_sent", ctypes.c_uint32),
+                ("repeat", ctypes.c_uint8), ("rep_left", ctypes.c_uint8)]
 
 
 class DecCfg(ctypes.Structure):
-    _fields_ = [("min_rows_per_chip", ctypes.c_float), ("max_rows_per_chip", ctypes.c_float), ("sync_tol", ctypes.c_float), ("min_contrast", ctypes.c_float),
+    _fields_ = [("min_rows_per_chip", ctypes.c_float), ("max_rows_per_chip", ctypes.c_float), ("min_contrast", ctypes.c_float),
                 ("track_timing", ctypes.c_int), ("min_quality", ctypes.c_float), ("rows_per_chip_hint", ctypes.c_float),
-                ("timing_retries", ctypes.c_int), ("grid_decode", ctypes.c_int), ("exposure_rows", ctypes.c_float),
+                ("timing_retries", ctypes.c_int), ("exposure_rows", ctypes.c_float),
                 ("parallel", ctypes.c_void_p), ("parallel_user", ctypes.c_void_p)]
 
 
@@ -96,6 +97,9 @@ _lib.rs_tx_set_burst.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint32, ctypes.c_u
 _lib.rs_tx_set_channels.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8, ctypes.c_uint32]
 _lib.rs_tx_set_repeat.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8]
 _lib.rs_tx_next_chips.argtypes = [ctypes.POINTER(Tx), ctypes.POINTER(ctypes.c_uint8)]
+_lib.rs_tx_slot_prepare.argtypes = [ctypes.POINTER(Slot), ctypes.c_uint8, ctypes.c_char_p, ctypes.c_size_t]; _lib.rs_tx_slot_prepare.restype = ctypes.c_size_t
+_lib.rs_tx_log_slot.argtypes = [ctypes.POINTER(Tx), ctypes.POINTER(Slot)]; _lib.rs_tx_log_slot.restype = ctypes.c_uint8
+_lib.rs_tx_prepare.argtypes = [ctypes.POINTER(Tx)]
 _lib.rs_rx_sizeof.restype = ctypes.c_size_t
 _lib.rs_rx_init.argtypes = [ctypes.c_void_p]
 _lib.rs_rx_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
@@ -122,7 +126,14 @@ _lib.rs_decode_profile.restype = ctypes.c_int
 _lib.rs_asm_init.argtypes = [ctypes.POINTER(Asm)]
 _lib.rs_asm_sizeof.restype = ctypes.c_size_t
 _lib.rs_asm_recovered.argtypes = [ctypes.POINTER(Asm)]; _lib.rs_asm_recovered.restype = ctypes.c_uint32
-assert ctypes.sizeof(Asm) == _lib.rs_asm_sizeof(), f"rs_asm_t layout mismatch: python {ctypes.sizeof(Asm)} vs C {_lib.rs_asm_sizeof()}"
+# The structures above mirror the C ones by hand: a size that differs means a field was added or
+# removed on one side only, and every call through that structure would corrupt memory (it
+# happened: rs_tx_t grew by two fields and this file wrote 8 bytes past each Transmitter).
+# A library loaded with RS_LIB from an older build fails here too.
+for _py, _c in ((Asm, "rs_asm_sizeof"), (Tx, "rs_tx_sizeof"), (DecCfg, "rs_dec_cfg_sizeof"), (Packet, "rs_packet_sizeof"), (Stats, "rs_dec_stats_sizeof")):
+    if hasattr(_lib, _c):
+        getattr(_lib, _c).restype = ctypes.c_size_t
+        assert ctypes.sizeof(_py) == getattr(_lib, _c)(), f"{_py.__name__} layout mismatch: python {ctypes.sizeof(_py)} vs C {getattr(_lib, _c)()} ({_c})"
 _lib.rs_asm_feed.argtypes = [ctypes.POINTER(Asm), ctypes.POINTER(Packet), ctypes.POINTER(Message)]
 _lib.rs_asm_feed.restype = ctypes.c_int
 
@@ -191,6 +202,17 @@ class Transmitter:
         i, s, p = ctypes.c_uint8(), ctypes.c_uint16(), ctypes.c_uint8()
         _lib.rs_tx_next_packet(ctypes.byref(self.tx), ctypes.byref(i), ctypes.byref(s), ctypes.byref(p))
         return i.value, s.value, p.value
+
+    def log_text(self, level: int, text: str):
+        """Log a text of any length the way the firmware does: one message per piece that
+        rs_tx_slot_prepare takes. Returns the characters each message took."""
+        raw = text.encode(); off = 0; took = []
+        while off < len(raw):
+            slot = Slot()
+            n = _lib.rs_tx_slot_prepare(ctypes.byref(slot), level, raw[off:], len(raw) - off)
+            if n == 0: break
+            _lib.rs_tx_log_slot(ctypes.byref(self.tx), ctypes.byref(slot)); took.append(n); off += n
+        return took
 
     def set_fault_weight(self, w: int):
         _lib.rs_tx_set_fault_weight(ctypes.byref(self.tx), w)
@@ -309,6 +331,9 @@ _lib.rs_multi_track_count.argtypes = [ctypes.c_void_p]; _lib.rs_multi_track_coun
 _lib.rs_multi_track_info.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
                                      ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_int)]
 _lib.rs_multi_track_info.restype = ctypes.c_int
+_lib.rs_multi_track_group.argtypes = [ctypes.c_void_p, ctypes.c_int]; _lib.rs_multi_track_group.restype = ctypes.c_int
+_lib.rs_tx_set_fault_weight.argtypes = [ctypes.POINTER(Tx), ctypes.c_uint8]
+MODES = ["luma", "rgb", "direct"]                            # RS_RX_MODE_*
 
 
 class Multi:
@@ -334,5 +359,5 @@ class Multi:
             tid = ctypes.c_int(); cx = ctypes.c_float(); cy = ctypes.c_float(); rad = ctypes.c_float(); mode = ctypes.c_int()
             pk = ctypes.c_uint32(); ms = ctypes.c_uint32(); pil = ctypes.c_int()
             if _lib.rs_multi_track_info(self.buf, i, ctypes.byref(tid), ctypes.byref(cx), ctypes.byref(cy), ctypes.byref(rad), ctypes.byref(mode), ctypes.byref(pk), ctypes.byref(ms), ctypes.byref(pil)):
-                out.append(dict(id=tid.value, group=_lib.rs_multi_track_group(self.buf, i), cx=round(cx.value), cy=round(cy.value), radius=round(rad.value), mode="rgb" if mode.value else "luma", packets=pk.value, messages=ms.value, pilots=pil.value))
+                out.append(dict(id=tid.value, group=_lib.rs_multi_track_group(self.buf, i), cx=round(cx.value), cy=round(cy.value), radius=round(rad.value), mode=MODES[mode.value], packets=pk.value, messages=ms.value, pilots=pil.value))
         return out

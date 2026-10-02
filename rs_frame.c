@@ -83,7 +83,7 @@ void rs_frame_profile(const uint8_t *y, int w, int h, int row_stride, int pixel_
         for (int c = 0; c < len; c++, p += v.st_cross) { sum += *p; if (*p > mx) mx = *p; }
         out[s] = (float)sum / (float)len;
         if (mx > peak) peak = mx;
-        if (mx >= 250) sat++;
+        if (mx >= RS_SAT_LEVEL) sat++;
     }
     info->roi_start = c0; info->roi_end = c1; info->count = v.n_scan;
     info->peak = peak; info->sat_frac = (float)sat / (float)v.n_scan;
@@ -111,7 +111,7 @@ void rs_frame_profile_rgb(const uint8_t *px, int w, int h, int row_stride, int p
             if (m > mx) mx = m;
         }
         if (mx > peak) peak = mx;
-        if (mx >= 250) sat++;
+        if (mx >= RS_SAT_LEVEL) sat++;
     }
     int kept = 0;
     for (int c = 0; c < len; c++) if (sat_col[c] < 2) kept++;
@@ -169,6 +169,7 @@ void rs_frame_profile_yuv420(const uint8_t *y, int y_rs, int y_ps,
 /* ------------------------------------------------------------ segmentation */
 #define RS_SEG_TW 256
 #define RS_SEG_TH 144
+#define RS_SEG_BRIDGE_PX 112   /* dark rows bridged inside a blob, each way */
 
 int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                          int r_off, int g_off, int b_off, rs_blob_t *out, int max_out)
@@ -176,10 +177,12 @@ int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pi
     static float th_img[RS_SEG_TW * RS_SEG_TH];
     static int16_t label[RS_SEG_TW * RS_SEG_TH];
     static int stack[RS_SEG_TW * RS_SEG_TH];
+    /* one thumbnail cell per ds x ds pixels: 8, or more for a frame that would not fit the
+     * thumbnail (a fixed 8 used to leave everything beyond 2048 x 1152 pixels unseen) */
     int ds = RS_FRAME_DS;
+    while (w / ds > RS_SEG_TW || h / ds > RS_SEG_TH) ds++;
     int tw = w / ds, th = h / ds;
-    if (tw > RS_SEG_TW) tw = RS_SEG_TW;
-    if (th > RS_SEG_TH) th = RS_SEG_TH;
+    int reach = RS_SEG_BRIDGE_PX / ds; if (reach < 1) reach = 1;
     float mn = 1e30f, mx = -1e30f;
     for (int y = 0; y < th; y++) {
         const uint8_t *row = px + (y * ds) * row_stride;
@@ -192,13 +195,13 @@ int rs_frame_segment_rgb(const uint8_t *px, int w, int h, int row_stride, int pi
         }
     }
     if (mx - mn < 20.0f) return 0;                    /* blank frame (burst pause): nothing to segment */
-    /* the modulation stripes the blob with dark rows: sync gaps (24 rows) and the RGB
-     * pilot block (~216 rows with single dim pulses). Fill them with a vertical running
-     * maximum of +-14 thumbnail rows (+-112 px) so a source stays one component. */
+    /* the modulation stripes the blob with dark rows: the sync gaps and, longer, the RGB pilot
+     * block with its single dim pulses. Fill them with a vertical running maximum of
+     * +-RS_SEG_BRIDGE_PX pixels so a source stays one component. */
     static float filled[RS_SEG_TW * RS_SEG_TH];
     for (int y = 0; y < th; y++) for (int x = 0; x < tw; x++) {
         float v = 0;
-        for (int k = -14; k <= 14; k++) { int yy = y + k; if (yy < 0 || yy >= th) continue; float u = th_img[yy * tw + x]; if (u > v) v = u; }
+        for (int k = -reach; k <= reach; k++) { int yy = y + k; if (yy < 0 || yy >= th) continue; float u = th_img[yy * tw + x]; if (u > v) v = u; }
         filled[y * tw + x] = v;
     }
     for (int i = 0; i < tw * th; i++) th_img[i] = filled[i];
@@ -300,7 +303,7 @@ void rs_frame_profile_rgb_blob2(const uint8_t *px, int w, int h, int row_stride,
             csum[c] = clipped ? -1.0f : y;                  /* previous sampled row, -1 = clipped */
         }
         if (mx > peak) peak = mx;
-        if (mx >= 250) sat++;
+        if (mx >= RS_SAT_LEVEL) sat++;
         cnt++;
     }
     /* a clipped column (a burst or fault-pulse edge gives it one huge step) is dropped outright

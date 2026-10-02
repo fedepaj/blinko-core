@@ -10,11 +10,12 @@
 #endif
 
 static float fabsf_(float x) { return x < 0 ? -x : x; }
+static float sqrtf_(float x) { if (x <= 0) return 0; float r = x > 1 ? x : 1; for (int i = 0; i < 16; i++) r = 0.5f * (r + x / r); return r; }
 
 void rs_rgb_cal_init(rs_rgb_cal_t *cal)
 {
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { cal->m[i][j] = (i == j); cal->inv[i][j] = (i == j); }
-    cal->valid = 0; cal->cond = 0; cal->rows_per_chip = 0; cal->pilot_row = -1; cal->pilots_seen = 0;
+    cal->valid = 0; cal->cond = 0; cal->pilots_seen = 0;
 }
 
 static int invert3(const float m[3][3], float inv[3][3], float *cond)
@@ -24,7 +25,7 @@ static int invert3(const float m[3][3], float inv[3][3], float *cond)
               + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
     float norm = 1.0f;
     for (int j = 0; j < 3; j++) { float c = 0; for (int i = 0; i < 3; i++) c += m[i][j] * m[i][j]; norm *= (c > 0 ? c : 1e-6f); }
-    *cond = fabsf_(det) / (norm > 0 ? (float)__builtin_sqrtf(norm) : 1e-6f);   /* 1 for orthogonal columns */
+    *cond = fabsf_(det) / (norm > 0 ? sqrtf_(norm) : 1e-6f);   /* 1 for orthogonal columns */
     if (fabsf_(det) < 1e-6f || *cond < 0.05f) return 0;
     float d = 1.0f / det;
     inv[0][0] =  (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * d;
@@ -78,7 +79,7 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
         }
         nr = w;
     }
-    /* pattern: dark(>=1.5P) H L H L H dark(>=1.5P), the five inner runs equal within 35 % */
+    /* pattern: dark H L H L H dark, with the tolerances explained below */
     for (int i = 1; i + 6 < nr; i++) {
         if (run_lvl[i] != 1) continue;
         float P = (float)run_len[i];
@@ -116,9 +117,9 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
             int s = run_start[i + 2 * k], l = run_len[i + 2 * k];
             float pk = -1e30f; for (int q = s; q < s + l; q++) if (y[q] > pk) pk = y[q];
             float ybase = base[0] + base[1] + base[2], thr2 = ybase + 0.75f * (pk - ybase);
-            float sr = 0, sg = 0, sb = 0; int n = 0;
-            for (int q = s; q < s + l; q++) if (y[q] >= thr2) { sr += r[q]; sg += g[q]; sb += b[q]; n++; }
-            if (n == 0) { mean3(r, g, b, s + l / 4, s + 3 * l / 4, v); } else { v[0] = sr / n; v[1] = sg / n; v[2] = sb / n; }
+            float sr = 0, sg = 0, sb = 0; int bright = 0;
+            for (int q = s; q < s + l; q++) if (y[q] >= thr2) { sr += r[q]; sg += g[q]; sb += b[q]; bright++; }
+            if (bright == 0) { mean3(r, g, b, s + l / 4, s + 3 * l / 4, v); } else { v[0] = sr / bright; v[1] = sg / bright; v[2] = sb / bright; }
             for (int c = 0; c < 3; c++) m[c][k] = v[c] - base[c];
         }
         /* normalise columns so unmixed channels have comparable amplitude */
@@ -134,8 +135,6 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
         for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = a * m[c][k] + (1 - a) * cal->m[c][k];
         if (!invert3(cal->m, cal->inv, &cal->cond)) { for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = m[c][k]; invert3(cal->m, cal->inv, &cal->cond); }
         cal->valid = 1;
-        cal->rows_per_chip = P / (float)RS_PILOT_P;
-        cal->pilot_row = (float)run_start[i];
         cal->pilots_seen++;
         return 1;
     }
@@ -153,5 +152,4 @@ void rs_rgb_unmix(const rs_rgb_cal_t *cal, const float *r, const float *g, const
     }
 }
 
-#include <stddef.h>
 size_t rs_rgb_cal_sizeof(void) { return sizeof(rs_rgb_cal_t); }

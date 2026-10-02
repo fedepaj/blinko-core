@@ -1,19 +1,24 @@
-"""Replay a .rsrec recording through the C receiver exactly as the app does.
+"""Replay a .rsrec recording through the C receiver.
 
-  replay.py REC.rsrec [--axis rows|columns] [--multi] [--json out.json] [--png N out.png] [--quiet]
+  replay.py REC.rsrec [--axis rows|columns] [--multi] [--row-us US] [--json out.json] [--png N out.png] [--quiet]
+
+The receiver gets the recording's exposure (header) and, with --row-us, the sensor's row time of
+the recorded rows (the header does not carry it; 5.1 for an iPhone 14, 10.6 for the Samsung S21 FE
+RAW recordings): without it the exposure is unknown to the detector, as in an app that was never
+calibrated. Frame times start at zero (the receiver takes a float).
 
 Prints per-recording metrics: frames, fps, packets/s, messages, RGB lock, pilots, resets.
 --multi runs the multi-source path (segmentation + one receiver per light) instead of the global ROI.
 """
-import argparse, ctypes, json, sys, time
+import argparse, ctypes, json
 import numpy as np
-from rscore import _lib, Receiver, Multi, LEVELS
+from rscore import _lib, Receiver, Multi
 from rsrec import Recording
 
 
 class Info(ctypes.Structure):
     _fields_ = [("roi_start", ctypes.c_int), ("roi_end", ctypes.c_int), ("count", ctypes.c_int),
-                ("peak", ctypes.c_int), ("sat_frac", ctypes.c_float)]
+                ("peak", ctypes.c_int), ("sat_frac", ctypes.c_float), ("kept_cols", ctypes.c_float)]      # rs_frame_info_t
 
 
 _lib.rs_frame_profile_rgb.argtypes = [ctypes.POINTER(ctypes.c_uint8)] + [ctypes.c_int] * 8 + [ctypes.POINTER(ctypes.c_float)] * 3 + [ctypes.POINTER(Info)]
@@ -33,23 +38,25 @@ def profiles_bgra(a, axis):
     return r[:c], g[:c], b[:c], info
 
 
-def replay(path, axis="rows", quiet=False, rx=None, multi=False):
+def replay(path, axis="rows", quiet=False, rx=None, multi=False, row_us=0.0):
     rec = Recording(path)
     rx = rx or (Multi() if multi else Receiver())
+    exposure_us = float(rec.header.get("exposureUs") or 0)
+    if row_us > 0: rx.set_camera(exposure_us / row_us, row_us * 1e-6)
     frames = len(rec); t0 = rec.frames[0][1] if frames else 0
     packets = 0; messages = []; per_frame = []; modes = []; conds = []; peaks = []; sats = []; ntracks = []; track_ids = set(); direct = 0
     for k in range(frames):
         ts, gyro, accel, a = rec.frame(k)
         if multi:
-            n, msgs = rx.process(a, ts)
+            n, msgs = rx.process(a, ts - t0)
             tr = rx.tracks(); ntracks.append(len(tr)); track_ids.update(t["id"] for t in tr)
             modes.append(any(t["mode"] == "rgb" for t in tr)); conds.append(0); peaks.append(0); sats.append(0)
             msgs = [(f"#{m[0]} s{m[1]}", m[2], m[3]) for m in msgs]
         else:
             r, g, b, info = profiles_bgra(a, axis)
-            n, msgs = rx.process(r, g, b, ts)
+            n, msgs = rx.process(r, g, b, ts - t0)
             direct += rx.mode == 2
-            modes.append(1 if rx.mode else 0); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
+            modes.append(1 if rx.mode == 1 else 0); conds.append(rx.cond); peaks.append(info.peak); sats.append(info.sat_frac)
         packets += n; per_frame.append(n)
         for m in msgs:
             messages.append((round(ts - t0, 3), m[0], m[1], m[2]))
@@ -76,6 +83,7 @@ def main():
     ap.add_argument("files", nargs="+"); ap.add_argument("--axis", default="rows")
     ap.add_argument("--json"); ap.add_argument("--png", nargs=2, metavar=("FRAME", "OUT")); ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--multi", action="store_true", help="multi-source path (segmentation + one receiver per light)")
+    ap.add_argument("--row-us", type=float, default=0.0, help="row time of the recorded rows in microseconds (0 = unknown)")
     a = ap.parse_args()
     if a.png:
         from PIL import Image
@@ -84,7 +92,7 @@ def main():
     results = []
     for f in a.files:
         print(f"== {f.split('/')[-1]}")
-        s = replay(f, a.axis, a.quiet, multi=a.multi)
+        s = replay(f, a.axis, a.quiet, multi=a.multi, row_us=a.row_us)
         results.append(s)
         print(f"   note={s['note']!r} frames={s['frames']} fps={s['fps']} pkt/s={s['pkt_per_s']} frames_with_pkts={s['frames_with_packets']} "
               f"msgs={s['messages']} rgb_frames={s['rgb_frames']} direct={s.get('direct_frames',0)} pilots={s['pilots']} cond={s['cond_mean']} resets={s['resets']} peak={s['peak_max']} sat={s['sat_mean']}"

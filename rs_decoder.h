@@ -5,6 +5,7 @@
  * Self-calibrating: the chip length in rows is measured from each packet's
  * sync pattern, so no camera-specific configuration is required; the exposure
  * (rows) improves the detection when known. Protocol v3: RLL(2,7) chips, ML detection.
+ * One decode at a time per thread (see RS_DEC_THREADS in rs_decoder.c).
  */
 #ifndef RS_DECODER_H
 #define RS_DECODER_H
@@ -31,13 +32,11 @@ typedef void (*rs_parallel_fn)(void *user, int count, void (*job)(void *ctx, int
 typedef struct {
     float min_rows_per_chip;  /* chip clocks searched, in rows per chip; default 1.2 */
     float max_rows_per_chip;  /* default 30 */
-    float sync_tol;           /* tolerance of the sync's OFF runs against the clock, default 0.30 */
     float min_contrast;       /* min local (max-min) to trust a row, profile units, default 6 */
     int   track_timing;       /* per-codeword +-1 row timing slips driving the survivor's clock PLL (default 1) */
     float min_quality;        /* quality = 1/(1 + 30 mse per row of the normalized profile); default 0.4 */
-    float rows_per_chip_hint; /* receiver's confirmed clock (0 = unknown): narrows the scales, is the first hypothesis, budget 6 instead of 24 */
+    float rows_per_chip_hint; /* receiver's confirmed clock (0 = unknown): narrows the scales, is the first hypothesis, 6 candidates per profile instead of 24 */
     int   timing_retries;     /* clock hypotheses around the sync's: 1 = +-2.5 % (default), 2 = also +-5 %; 0 = the sync's only */
-    int   grid_decode;        /* receiver: also decode at predicted grid positions next to decoded packets (default 1) */
     float exposure_rows;      /* camera exposure in rows (exposure_us / row_us); 0 = unknown, half a chip is assumed */
     rs_parallel_fn parallel;  /* optional: the validated sync candidates of a profile are detected in parallel (map), then merged (reduce) */
     void *parallel_user;
@@ -55,7 +54,7 @@ typedef struct {
 } rs_packet_t;
 
 typedef struct {
-    int   syncs;              /* sync candidates run through the detector */
+    int   syncs;              /* sync candidates examined (validated or not) */
     int   crc_ok;             /* packets returned */
     int   crc_fail;           /* detector runs that completed and failed the CRC (or the quality / rigid-grid check) */
     int   truncated;          /* candidates whose packet did not fit the blob and could not be read cyclically or backward */
@@ -64,6 +63,10 @@ typedef struct {
 } rs_dec_stats_t;
 
 void rs_dec_cfg_default(rs_dec_cfg_t *cfg);
+/* Sizes of the structures above, for bindings that mirror them (a layout check at load time). */
+size_t rs_dec_cfg_sizeof(void);
+size_t rs_packet_sizeof(void);
+size_t rs_dec_stats_sizeof(void);
 
 /* A validated sync candidate (see rs_decode_syncs): gap start row x, clock in rows per chip. */
 typedef struct { float x, rpc, amp; } rs_sync_t;
@@ -84,12 +87,8 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                       rs_packet_t *out, int max_out, rs_dec_stats_t *st);
 
 /* Decode a packet at a known position (row of its gap chip, chip length in rows): no sync
- * search. Returns 1 and fills out when the start bit and CRC pass. */
+ * search. Returns 1 and fills out when the CRC, the quality and the rigid-grid check pass. */
 int rs_decode_at(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
-/* Same, reusing the cumulative sums of the last rs_decode_profile / rs_decode_at call on this
- * very profile (valid right after them; do not use after decoding another profile). */
-int rs_decode_at_prepared(const float *p, int n, const rs_dec_cfg_t *cfg, float row_start, float rpc, rs_packet_t *out);
-
 
 #ifdef __cplusplus
 }

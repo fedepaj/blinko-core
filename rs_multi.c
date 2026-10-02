@@ -9,6 +9,12 @@ void rs_multi_init(rs_multi_t *m)
     m->next_id = 1;
 }
 
+void rs_multi_reset(rs_multi_t *m)
+{
+    rs_camera_t cam = m->camera; rs_parallel_fn fn = m->parallel; void *user = m->parallel_user; float mc = m->min_contrast;
+    rs_multi_init(m);
+    m->camera = cam; m->parallel = fn; m->parallel_user = user; m->min_contrast = mc;
+}
 
 static int overlap(const rs_track_t *tr, const rs_blob_t *b)
 {
@@ -82,8 +88,8 @@ static void track_feed(rs_multi_t *m, rs_track_t *tr, const uint8_t *px, int w, 
     }
     tr->last_seen = t; tr->seen_frames++;
     rs_frame_info_t info;
-    /* rows always include the halo; columns only when most of the blob's own columns clip
-     * (a saturated core: the halo carries the gaps; an unsaturated LED: extra columns are noise) */
+    /* rows and columns both include the halo: the matched column weights sort out which columns
+     * carry the stripes */
     rs_blob_t e; profile_box(m, tr, u, w, h, RS_TRACK_WIDE_COLS, &e);
     /* Two profile hypotheses: with the clipped core columns (matched weights only) and without
      * them. Which one carries the gaps depends on the light (a pulsed fault LED saturates its
@@ -104,7 +110,10 @@ static void track_feed(rs_multi_t *m, rs_track_t *tr, const uint8_t *px, int w, 
         rs_frame_info_t ia;
         rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 0, a_r, a_g, a_b, &ia);
         rs_frame_profile_rgb_blob2(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &e, 1, s_r, s_g, s_b, &info);
-        if (info.kept_cols < 1.0f) {        /* the two variants differ only when something clips */
+        /* The two variants differ only when something clips. (kept_cols does not tell: it counts
+         * the columns that got a weight, under 1 for any blob with a dark surround, and the
+         * comparison used to run for every light, a quarter of the frame's time for nothing.) */
+        if (info.sat_frac > 0.0f) {
             int ya = profile_yield(&tr->rx, a_r, a_g, a_b, h), yb = profile_yield(&tr->rx, s_r, s_g, s_b, h);
             if (ya > yb || (ya == yb && !tr->drop_clipped)) {
                 tr->drop_clipped = 0;
@@ -141,39 +150,41 @@ static int seed_relation_ok(int dseed, int dq)
     for (int k = 0; k < 5; k++) { int d = dseed - (dq + shift[k]); if (d < 0) d = -d; if (d <= 1) return 1; }
     return 0;
 }
-/* Packet index distance between two packets (rows within a frame plus the time between frames,
- * with the protocol's default chip length: the test only needs +-1 packet). */
-#ifndef RS_LINK_CHIP_S
-#define RS_LINK_CHIP_S 30e-6f
-#endif
-static float packet_distance(float ta, float rowa, float tb, float rowb, float rpc)
+/* Packet index distance between two packets: rows within a frame plus the time between frames.
+ * The chip lasts rows-per-chip times the sensor's row time (the board's T is not known to the
+ * receiver; a constant of 30 us, the chip of protocol v2, stood here and put packets of other
+ * frames 1.5 times too close at the v3 default). */
+static float packet_distance(float ta, float rowa, float tb, float rowb, float rpc, float row_seconds)
 {
-    return (rowb - rowa) / (rpc * (float)RS_PKT_CHIPS) + (tb - ta) / (RS_LINK_CHIP_S * (float)RS_PKT_CHIPS);
+    float d = (rowb - rowa) / (rpc * (float)RS_PKT_CHIPS);
+    if (tb != ta) d += (tb - ta) / (rpc * row_seconds * (float)RS_PKT_CHIPS);
+    return d;
 }
-static float pair_evidence(const rs_track_t *ta, const rs_rx_packet_t *pa, float t, const rs_track_t *tb, int skip_same_frame)
+/* Evidence that packet pa (seen at time t) and track tb's recent packets belong to one carousel.
+ * Without the sensor's row time only packets of the same frame can be compared. */
+static float pair_evidence(const rs_rx_packet_t *pa, float t, const rs_track_t *tb, int skip_same_frame, float row_seconds)
 {
     float e = 0;
     if (pa->pkt.seed >= RS_SEED_MSGCRC2) return 0;
     for (int j = 0; j < tb->nrecent; j++) {
-        const __typeof__(tb->recent[0]) *rb = &tb->recent[j];
+        const rs_track_pkt_t *rb = &tb->recent[j];
         if (rb->id != pa->pkt.id || rb->seed >= RS_SEED_MSGCRC2) continue;
         if (skip_same_frame && rb->t == t) continue;
+        if (rb->t != t && row_seconds <= 0) continue;
         if (t - rb->t > 0.02f || rb->t - t > 0.02f) continue;         /* within ~2 frames: at most one pilot block (0.5 packet) in between */
         float rpc = 0.5f * (pa->pkt.rows_per_chip + rb->rpc);
-        float dp_f = packet_distance(t, pa->pkt.row_start, rb->t, rb->row, rpc);
+        float dp_f = packet_distance(t, pa->pkt.row_start, rb->t, rb->row, rpc, row_seconds);
         int dp = (int)(dp_f + (dp_f >= 0 ? 0.5f : -0.5f));
         int dseed = (int)rb->seed - (int)pa->pkt.seed, dch = (int)rb->ch - (int)pa->channel;
         int ok = seed_relation_ok(dseed, dp + dch) || seed_relation_ok(dseed, 3 * dp + dch);
         e += ok ? 1.0f : -0.3f;
     }
-    (void)ta;
     return e;
 }
-static void remember_packets(rs_track_t *tr, float t);
-static void remember_packets_impl(rs_track_t *tr, float t)
+static void remember_packets(rs_track_t *tr, float t)
 {
     for (int i = 0; i < tr->rx.npkts; i++) {
-        __typeof__(tr->recent[0]) *r = &tr->recent[tr->recent_head];
+        rs_track_pkt_t *r = &tr->recent[tr->recent_head];
         r->t = t; r->row = tr->rx.pkts[i].pkt.row_start; r->rpc = tr->rx.pkts[i].pkt.rows_per_chip;
         r->seed = tr->rx.pkts[i].pkt.seed; r->id = tr->rx.pkts[i].pkt.id; r->ch = tr->rx.pkts[i].channel;
         tr->recent_head = (tr->recent_head + 1) % RS_TRACK_RECENT;
@@ -190,7 +201,6 @@ static int in_rows(const rs_track_t *tr, float row)
     float h = (float)(tr->r1 - tr->r0);
     return row >= tr->r0 - 0.25f * h && row <= tr->r1 + 0.25f * h;
 }
-static float pair_evidence(const rs_track_t *ta, const rs_rx_packet_t *pa, float t, const rs_track_t *tb, int skip_same_frame);
 #ifndef RS_LEAK_AMP
 #define RS_LEAK_AMP 0.3f   /* a packet under this fraction of the track's typical amplitude is another light's */
 #endif
@@ -209,7 +219,7 @@ static void drop_crosstalk(rs_multi_t *m, float t)
             for (int b = 0; b < RS_MAX_TRACKS && m->keep[a][i]; b++) {
                 const rs_track_t *tb = &m->tracks[b];
                 if (b == a || !tb->active || tb->amp_n < 5 || amp >= RS_LEAK_AMP * tb->amp_typ) continue;
-                if (pair_evidence(ta, pa, t, tb, 0) > 0) m->keep[a][i] = 0;
+                if (pair_evidence(pa, t, tb, 0, m->camera.row_seconds) > 0) m->keep[a][i] = 0;
             }
         }
     }
@@ -251,9 +261,7 @@ static void drop_crosstalk(rs_multi_t *m, float t)
                     if (pa->pkt.id != pb->pkt.id || pa->pkt.seed != pb->pkt.seed || pa->pkt.payload != pb->pkt.payload) continue;
                     float d = pa->pkt.row_start - pb->pkt.row_start; if (d < 0) d = -d;
                     if (d > 2.0f * pa->pkt.rows_per_chip) continue;
-                    float row = pa->pkt.row_start;
-                    int in_a = row >= ta->r0 - 0.25f * (ta->r1 - ta->r0) && row <= ta->r1 + 0.25f * (ta->r1 - ta->r0);
-                    int in_b = row >= tb->r0 - 0.25f * (tb->r1 - tb->r0) && row <= tb->r1 + 0.25f * (tb->r1 - tb->r0);
+                    int in_a = in_rows(ta, pa->pkt.row_start), in_b = in_rows(tb, pa->pkt.row_start);
                     if (in_a && !in_b) m->keep[b][j] = 0;
                     else if (in_b && !in_a) m->keep[a][i] = 0;
                     /* both or neither: cannot tell, keep both (linked lights of one board are this case) */
@@ -263,7 +271,6 @@ static void drop_crosstalk(rs_multi_t *m, float t)
     }
 }
 
-static void remember_packets(rs_track_t *tr, float t) { remember_packets_impl(tr, t); }
 static void link_tracks(rs_multi_t *m, float t)
 {
     /* packets were remembered before the cross-talk filter; per pair, A-new vs B-all (same
@@ -275,8 +282,8 @@ static void link_tracks(rs_multi_t *m, float t)
             rs_track_t *tb = &m->tracks[b];
             if (!tb->active) continue;
             float evidence = 0;
-            for (int i = 0; i < ta->rx.npkts; i++) evidence += pair_evidence(ta, &ta->rx.pkts[i], t, tb, 0);
-            for (int i = 0; i < tb->rx.npkts; i++) evidence += pair_evidence(tb, &tb->rx.pkts[i], t, ta, 1);
+            for (int i = 0; i < ta->rx.npkts; i++) evidence += pair_evidence(&ta->rx.pkts[i], t, tb, 0, m->camera.row_seconds);
+            for (int i = 0; i < tb->rx.npkts; i++) evidence += pair_evidence(&tb->rx.pkts[i], t, ta, 1, m->camera.row_seconds);
             float s = m->link[a][b] * 0.995f + evidence;
             if (s > 12.0f) s = 12.0f; if (s < -4.0f) s = -4.0f;
             m->link[a][b] = m->link[b][a] = s;
@@ -302,6 +309,12 @@ void rs_multi_set_camera(rs_multi_t *m, rs_camera_t cam)
     for (int i = 0; i < RS_MAX_TRACKS; i++) rs_rx_set_camera(&m->tracks[i].rx, cam);
 }
 
+void rs_multi_set_min_contrast(rs_multi_t *m, float min_contrast)
+{
+    m->min_contrast = min_contrast;
+    for (int i = 0; i < RS_MAX_TRACKS; i++) if (m->tracks[i].active && min_contrast > 0) m->tracks[i].rx.cfg.min_contrast = min_contrast;
+}
+
 void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user)
 {
     m->parallel = fn; m->parallel_user = user;
@@ -311,6 +324,7 @@ void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user)
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,
                      int r_off, int g_off, int b_off, float t)
 {
+    if (h > RS_DEC_MAX_ROWS) h = RS_DEC_MAX_ROWS;     /* the profiles hold that many rows: a taller frame is read down to there */
     m->nblobs = rs_frame_segment_rgb(px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, m->blobs, RS_MAX_BLOBS);
     int assigned[RS_MAX_BLOBS]; for (int i = 0; i < RS_MAX_BLOBS; i++) assigned[i] = 0;
     for (int k = 0; k < RS_MAX_TRACKS; k++) m->tracks[k].packets_frame = 0;
@@ -349,6 +363,7 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         rs_rx_init(&tr->rx);
         rs_rx_set_camera(&tr->rx, m->camera);
         rs_rx_set_parallel(&tr->rx, m->parallel, m->parallel_user);
+        if (m->min_contrast > 0) tr->rx.cfg.min_contrast = m->min_contrast;
         tr->rx.defer_assembly = 1;
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;

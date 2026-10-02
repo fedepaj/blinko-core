@@ -41,8 +41,8 @@ def main():
     print(f"profile: {len(p)} samples, roi {roi}, contrast {st.contrast:.0f}, syncs {st.syncs}, crc_fail {st.crc_fail}, truncated {st.truncated}")
     asm = Assembler()
     for pk in pkts:
-        kind = "META" if pk.idx == 31 else f"idx {pk.idx:2d}"
-        print(f"  slot {pk.id} {kind} data 0x{pk.data:02x} rows {pk.row_start:7.1f}-{pk.row_end:7.1f} rpc {pk.rows_per_chip:5.2f} q {pk.quality:.2f}")
+        kind = {127: "META", 126: "META (packed)", 125: "CRC", 124: "CRC2"}.get(pk.seed, f"seed {pk.seed:3d}")
+        print(f"  slot {pk.id} {kind} payload 0x{pk.payload:02x} rows {pk.row_start:7.1f}-{pk.row_end:7.1f} rpc {pk.rows_per_chip:5.2f} q {pk.quality:.2f}")
         m = asm.feed(pk)
         if m: print("  -> message", m)
     if a.plot:

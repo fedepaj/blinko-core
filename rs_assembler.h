@@ -1,5 +1,5 @@
 /*
- * rs_assembler.h — reassemble messages from decoded v2 packets.
+ * rs_assembler.h — reassemble messages from decoded packets.
  * Systematic and fountain-coded packets are rows of a linear system over
  * GF(2); incremental Gaussian elimination solves the message as soon as the
  * rank reaches the length. Packets received before the META are buffered.
@@ -15,6 +15,7 @@ extern "C" {
 
 #define RS_ASM_PENDING 24
 #define RS_ASM_RAW     56      /* raw rows kept for poisoned-row recovery */
+#define RS_ASM_MAX_CONTRADICTIONS 6   /* rows inconsistent with the system before the slot starts over */
 #define RS_TEXT_MAX    64
 
 typedef struct {
