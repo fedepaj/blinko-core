@@ -391,6 +391,12 @@ int rs_multi_track_count(const rs_multi_t *m)
     return n;
 }
 
+const rs_rx_t *rs_multi_track_rx(const rs_multi_t *m, int i)
+{
+    const rs_track_t *t = rs_multi_track(m, i);
+    return t ? &t->rx : NULL;
+}
+
 const rs_track_t *rs_multi_track(const rs_multi_t *m, int i)
 {
     for (int k = 0; k < RS_MAX_TRACKS; k++) {
