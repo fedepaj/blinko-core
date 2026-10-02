@@ -57,10 +57,14 @@ static int grid_decode(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, int
 
 /* Decoding of one channel's profile: the detector, then the grid decode on the same prepared
  * profile. A pure function of the profile and the configuration, so channels can run in parallel. */
-static int decode_profile(rs_rx_t *rx, const float *p, int n, rs_packet_t *out, rs_dec_stats_t *st)
+static int stitch_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel, int got_packets, float t, rs_packet_t *out);
+static int decode_profile(rs_rx_t *rx, const float *p, int n, uint8_t channel, rs_packet_t *out, rs_dec_stats_t *st, int *stitched)
 {
     int k = rs_decode_profile(p, n, &rx->cfg, out, 32, st);
-    return grid_decode(rx, p, n, out, k, 32);
+    k = grid_decode(rx, p, n, out, k, 32);
+    *stitched = 0;
+    if (k == 0 && stitch_channel(rx, p, n, channel, k, rx->frame_t, &out[0])) { k = 1; *stitched = 1; }
+    return k;
 }
 
 /* Bookkeeping of one channel's packets: clock hint, packet list, assembly. Sequential. */
@@ -87,20 +91,18 @@ static void take_packets(rs_rx_t *rx, const rs_packet_t *out, int k, uint8_t cha
  * can change), see take_packets. */
 static void set_hint(rs_rx_t *rx) { rx->cfg.rows_per_chip_hint = rx->rpc_n >= 3 ? rx->rows_per_chip : 0; }
 
-static float s_frame_t = 0;                     /* time of the frame being processed (stitcher) */
-static void stitch_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel, int got_packets, float t);
 static void decode_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel)
 {
-    rs_packet_t out[32];
+    rs_packet_t out[32]; int stitched;
     set_hint(rx);
-    int k = decode_profile(rx, p, n, out, &rx->last_stats);
+    int k = decode_profile(rx, p, n, channel, out, &rx->last_stats, &stitched);
+    if (stitched) rx->stitched_total++;
     take_packets(rx, out, k, channel);
-    stitch_channel(rx, p, n, channel, k, s_frame_t);
 }
 
 /* Three channels at once through the platform's parallel hook, then the bookkeeping in order. */
-typedef struct { rs_rx_t *rx; const float *p[3]; int n; rs_packet_t out[3][32]; int k[3]; rs_dec_stats_t st[3]; } rs_job3_t;
-static void job3(void *ctx, int i) { rs_job3_t *j = (rs_job3_t *)ctx; j->k[i] = decode_profile(j->rx, j->p[i], j->n, j->out[i], &j->st[i]); }
+typedef struct { rs_rx_t *rx; const float *p[3]; int n; rs_packet_t out[3][32]; int k[3]; int stitched[3]; rs_dec_stats_t st[3]; } rs_job3_t;
+static void job3(void *ctx, int i) { rs_job3_t *j = (rs_job3_t *)ctx; j->k[i] = decode_profile(j->rx, j->p[i], j->n, (uint8_t)i, j->out[i], &j->st[i], &j->stitched[i]); }
 static void decode_channels3(rs_rx_t *rx, const float *c0, const float *c1, const float *c2, int n)
 {
     if (!rx->parallel) { decode_channel(rx, c0, n, 0); decode_channel(rx, c1, n, 1); decode_channel(rx, c2, n, 2); return; }
@@ -108,26 +110,23 @@ static void decode_channels3(rs_rx_t *rx, const float *c0, const float *c1, cons
     j.rx = rx; j.p[0] = c0; j.p[1] = c1; j.p[2] = c2; j.n = n;
     set_hint(rx);
     rx->parallel(rx->parallel_user, 3, job3, &j);
-    for (int c = 0; c < 3; c++) take_packets(rx, j.out[c], j.k[c], (uint8_t)c);
+    for (int c = 0; c < 3; c++) { if (j.stitched[c]) rx->stitched_total++; take_packets(rx, j.out[c], j.k[c], (uint8_t)c); }
     rx->last_stats = j.st[2];
-    for (int c = 0; c < 3; c++) stitch_channel(rx, j.p[c], n, (uint8_t)c, j.k[c], s_frame_t);
 }
 
 void rs_rx_set_row_time(rs_rx_t *rx, float seconds) { rx->row_seconds = seconds; }
 
 /* Stitching: when a channel's frame yielded no packet, its piece joins the stitcher of that
- * channel (the detector left the profile normalized and knows where syncs are). */
-static void stitch_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel, int got_packets, float t)
+ * channel. Runs on the thread that ran the detector on this profile (the decoder's validated
+ * syncs and normalized profile are thread-local), right after it. Returns 1 with a packet. */
+static int stitch_channel(rs_rx_t *rx, const float *p, int n, uint8_t channel, int got_packets, float t, rs_packet_t *out)
 {
-    if (!rx->stitch_enabled || got_packets) return;
-    rs_sync_t syncs[4]; int ns = rs_decode_syncs(p, n, &rx->cfg, syncs, 4);
+    if (!rx->stitch_enabled || got_packets) return 0;
+    rs_sync_t syncs[4]; int ns = rs_decode_last_syncs(p, n, syncs, 4);
+    if (ns < 0) ns = rs_decode_syncs(p, n, &rx->cfg, syncs, 4);
     const float *norm, *amp; int m; rs_decode_normalized(&norm, &amp, &m);
-    if (m != n) return;
-    rs_packet_t pk;
-    if (rs_stitch_feed(&rx->stitch[channel], p, norm, amp, n, rx->cfg.min_contrast, syncs, ns, rx->cfg.rows_per_chip_hint, rx->row_seconds, t, &rx->cfg, &pk)) {
-        rx->stitched_total++;
-        take_packets(rx, &pk, 1, channel);
-    }
+    if (m != n) return 0;
+    return rs_stitch_feed(&rx->stitch[channel], p, norm, amp, n, rx->cfg.min_contrast, syncs, ns, rx->cfg.rows_per_chip_hint, rx->row_seconds, t, &rx->cfg, out);
 }
 
 void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user) { rx->parallel = fn; rx->parallel_user = user; rx->cfg.parallel = fn; rx->cfg.parallel_user = user; }
@@ -163,7 +162,7 @@ int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, i
     if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
     rx->frames++;
     rx->npkts = 0;
-    s_frame_t = t;
+    rx->frame_t = t;
     if (b == NULL || g == NULL) {
         rx->mode = 0;
         decode_channel(rx, r, n, 0);

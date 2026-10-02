@@ -100,9 +100,9 @@ _lib.rs_rx_sizeof.restype = ctypes.c_size_t
 _lib.rs_rx_init.argtypes = [ctypes.c_void_p]
 _lib.rs_rx_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
 _lib.rs_rx_process.restype = ctypes.c_int
-_lib.rs_rx_set_row_time.argtypes = [ctypes.c_void_p, ctypes.c_float]
-_lib.rs_rx_set_parallel.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
-_lib.rs_rx_stitched.argtypes = [ctypes.c_void_p]; _lib.rs_rx_stitched.restype = ctypes.c_uint32
+for _name, _args, _ret in (("rs_rx_set_row_time", [ctypes.c_void_p, ctypes.c_float], None), ("rs_rx_set_parallel", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], None),
+                           ("rs_rx_stitched", [ctypes.c_void_p], ctypes.c_uint32)):
+    if hasattr(_lib, _name): getattr(_lib, _name).argtypes = _args; getattr(_lib, _name).restype = _ret   # absent in older builds loaded via RS_LIB
 _lib.rs_rx_pop_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(Message)]
 _lib.rs_rx_pop_message.restype = ctypes.c_int
 for name, rt in (("rs_rx_mode", ctypes.c_int), ("rs_rx_rows_per_chip", ctypes.c_float), ("rs_rx_pilots", ctypes.c_int), ("rs_rx_cal_cond", ctypes.c_float), ("rs_rx_packets", ctypes.c_uint32), ("rs_rx_messages", ctypes.c_uint32)):

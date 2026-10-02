@@ -135,6 +135,7 @@ int rs_stitch_feed(rs_stitch_t *s, const float *p, const float *norm, const floa
     ns = sy ? 1 : 0;
     float rpc = sy ? sy->rpc : (s->rpc_est > 0 ? s->rpc_est : (rpc_hint > 0 ? rpc_hint : s->rpc));
     if (rpc <= 0) { ST_DBG("t=%.3f no clock (hint %.2f)\n", t, rpc_hint); return 0; }
+    if ((float)(r1 - r0) > (float)RS_PKT_CHIPS * rpc) return 0;          /* the blob holds a whole packet: the detector's job, nothing to stitch */
     int trim = iroundf_(1.0f * rpc); r0 += trim; r1 -= trim;
     if (r1 - r0 < iroundf_(RS_SYNC_CHIPS * rpc)) { ST_DBG("t=%.3f piece too short (%d rows)\n", t, r1 - r0); return 0; }
     ST_DBG("t=%.3f rows %d-%d sync %s rpc %.2f%s\n", t, r0, r1, sy ? "yes" : "no", rpc, sy ? "" : (s->have_anchor && s->chip_seconds > 0 ? " predicted" : " no anchor"));

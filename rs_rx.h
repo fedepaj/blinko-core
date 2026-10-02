@@ -40,6 +40,7 @@ typedef struct {
     rs_parallel_fn parallel;     /* optional: decodes the channels of a frame in parallel (rs_parallel_fn in rs_decoder.h); also handed to the decoder via cfg */
     void          *parallel_user;
     float         row_seconds;      /* sensor row time (s), 0 = unknown; enables phase prediction in the stitcher */
+    float         frame_t;          /* time of the frame being processed */
     int           stitch_enabled;   /* default 1: pieces of repeated packets are stitched across frames */
     rs_stitch_t   stitch[3];        /* one per channel */
     uint32_t      stitched_total;   /* packets obtained by stitching */

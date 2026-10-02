@@ -688,6 +688,7 @@ static void cand_job(void *ctx, int i)
 }
 
 static RS_TLS rs_cjob_t s_jobs[24];
+static RS_TLS const float *s_last_p = 0; static RS_TLS int s_last_n = 0, s_last_nj = 0;
 /* steps 1-3: candidates at every scale, ranking, validation; returns the validated jobs */
 static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_dec_stats_t *st, rs_cjob_t *jobs, int budget)
 {
@@ -808,6 +809,7 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
     RS_TIMER(tt0);
     rs_cjob_t *jobs = s_jobs;                         /* per calling thread: a channel's detector may itself run on a channel thread */
     int nj = collect_validate(p, n, cfg, st, jobs, cfg->rows_per_chip_hint > 0 ? 6 : 24);
+    s_last_p = p; s_last_n = n; s_last_nj = nj;       /* for rs_decode_last_syncs */
     if (nj < 0) return 0;
     /* 4. detection (map): every validated candidate is independent — forward decode, then the
      *    packet before the sync — so they run through the platform's parallel hook when there is
@@ -840,6 +842,14 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
 }
 
 const uint8_t *rs_decode_debug_binary(int *n) { if (n) *n = s_dbg_n; return s_dbg; }
+
+int rs_decode_last_syncs(const float *p, int n, rs_sync_t *out, int max_out)
+{
+    if (p != s_last_p || n != s_last_n) return -1;
+    int k = 0;
+    for (int i = 0; i < s_last_nj && k < max_out; i++) { out[k].x = s_jobs[i].x; out[k].rpc = s_jobs[i].rpc; out[k].amp = s_jobs[i].amp; k++; }
+    return k;
+}
 
 int rs_decode_syncs(const float *p, int n, const rs_dec_cfg_t *cfg, rs_sync_t *out, int max_out)
 {

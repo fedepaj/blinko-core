@@ -66,6 +66,9 @@ typedef struct { float x, rpc, amp; } rs_sync_t;
  * where packets start and at what clock, even when no whole packet fits the frame. Returns the
  * count written to out (<= max_out). Leaves the profile normalized for the last candidate's scale. */
 int rs_decode_syncs(const float *p, int n, const rs_dec_cfg_t *cfg, rs_sync_t *out, int max_out);
+/* The validated syncs of the last rs_decode_profile call on this thread, without recomputing
+ * them; -1 when that call was on another profile. */
+int rs_decode_last_syncs(const float *p, int n, rs_sync_t *out, int max_out);
 /* The envelope-normalized profile (0..1) and local amplitude of the last prepared profile on this
  * thread, as the detector sees them (valid right after rs_decode_profile / rs_decode_syncs). */
 void rs_decode_normalized(const float **norm, const float **amp, int *n);
