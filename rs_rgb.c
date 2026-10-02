@@ -2,6 +2,12 @@
 #include "rs_proto.h"
 
 #define RS_RGB_MAX_RUNS 4096
+#ifdef RS_DEC_DEBUG
+#include <stdio.h>
+#define RS_RGB_DBG(...) fprintf(stderr, "pilot: " __VA_ARGS__)
+#else
+#define RS_RGB_DBG(...) ((void)0)
+#endif
 
 static float fabsf_(float x) { return x < 0 ? -x : x; }
 
@@ -82,29 +88,48 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
          * the OFF runs alike: on a 57 us-exposure phone at T = 105 us the 4-chip pulses read
          * ~100 rows and the 4-chip gaps ~25 at this threshold (a 0.25 ratio), still a pilot. */
         int ok = 1;
-        for (int k = 2; k < 5; k += 2) if (fabsf_((float)run_len[i + k] - P) > 0.3f * P) { ok = 0; break; }
+        for (int k = 2; k < 5; k += 2) if (fabsf_((float)run_len[i + k] - P) > 0.4f * P) { ok = 0; break; }   /* 40 %: at one threshold a dimmer die reads a narrower pulse */
         float G = (float)run_len[i + 1], gtol = 0.35f * G > 0.1f * P ? 0.35f * G : 0.1f * P;
         if (ok && (fabsf_((float)run_len[i + 3] - G) > gtol || G < 0.12f * P || G > 1.6f * P)) ok = 0;
+        if (ok) RS_RGB_DBG("triple at %d: pulses %d %d %d gaps %d %d dark %d/%d\n", run_start[i], run_len[i], run_len[i + 2], run_len[i + 4], run_len[i + 1], run_len[i + 3], run_len[i - 1], run_len[i + 5]);
         if (!ok) continue;
-        if (run_lvl[i - 1] != 0 || (float)run_len[i - 1] < 1.5f * G) continue;
-        if (run_lvl[i + 5] != 0 || (float)run_len[i + 5] < 1.5f * G) continue;
+        /* dark zones around the block: 2P nominally, but the exposure smear and the 15 % threshold
+         * eat them from both sides (a 57 us exposure at 3 rows per chip leaves 4 rows of 26), so
+         * half a gap is all that is asked; the colour matrix below is the real test of a pilot */
+        float dmin = 0.5f * G > 2.0f ? 0.5f * G : 2.0f;
+        if (run_lvl[i - 1] != 0 || (float)run_len[i - 1] < dmin) continue;
+        if (run_lvl[i + 5] != 0 || (float)run_len[i + 5] < dmin) continue;
         /* found: measure RGB in the middle half of each pulse minus the dark baseline */
         float base[3], m[3][3], v[3];
-        mean3(r, g, b, run_start[i + 1] + run_len[i + 1] / 4, run_start[i + 1] + 3 * run_len[i + 1] / 4, base);
+        /* the dark baseline: the deeper of the two dark zones around the block (their middle
+         * halves); the gaps between the pulses are a few rows at a long exposure and never reach
+         * the floor, which would make every pulse look equal and the matrix singular */
+        { float b1[3], b2[3];
+          mean3(r, g, b, run_start[i - 1] + run_len[i - 1] / 4, run_start[i - 1] + 3 * run_len[i - 1] / 4 + 1, b1);
+          mean3(r, g, b, run_start[i + 5] + run_len[i + 5] / 4, run_start[i + 5] + 3 * run_len[i + 5] / 4 + 1, b2);
+          int use2 = (b2[0] + b2[1] + b2[2]) < (b1[0] + b1[1] + b1[2]);
+          for (int c = 0; c < 3; c++) base[c] = use2 ? b2[c] : b1[c]; }
         for (int k = 0; k < 3; k++) {
+            /* the pulse's colour from its brightest rows (luma within 25 % of the pulse's peak):
+             * at a long exposure the ramps reach a third of the way into a pulse and its middle
+             * half would mix the neighbouring pulses in */
             int s = run_start[i + 2 * k], l = run_len[i + 2 * k];
-            mean3(r, g, b, s + l / 4, s + 3 * l / 4, v);
+            float pk = -1e30f; for (int q = s; q < s + l; q++) if (y[q] > pk) pk = y[q];
+            float ybase = base[0] + base[1] + base[2], thr2 = ybase + 0.75f * (pk - ybase);
+            float sr = 0, sg = 0, sb = 0; int n = 0;
+            for (int q = s; q < s + l; q++) if (y[q] >= thr2) { sr += r[q]; sg += g[q]; sb += b[q]; n++; }
+            if (n == 0) { mean3(r, g, b, s + l / 4, s + 3 * l / 4, v); } else { v[0] = sr / n; v[1] = sg / n; v[2] = sb / n; }
             for (int c = 0; c < 3; c++) m[c][k] = v[c] - base[c];
         }
         /* normalise columns so unmixed channels have comparable amplitude */
         for (int k = 0; k < 3; k++) {
             float s = 0; for (int c = 0; c < 3; c++) s += m[c][k];
-            if (s < 3.0f) { ok = 0; break; }
+            if (s < 3.0f) { RS_RGB_DBG("  pulse %d too weak (%.1f)\n", k, s); ok = 0; break; }
             for (int c = 0; c < 3; c++) m[c][k] /= s;
         }
         if (!ok) continue;
         float inv[3][3], cond;
-        if (!invert3(m, inv, &cond) || cond < 0.35f) continue;   /* degenerate colour response: not a usable pilot */
+        if (!invert3(m, inv, &cond) || cond < 0.35f) { RS_RGB_DBG("  matrix cond %.2f rejected (m rows %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f)\n", cond, m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2]); continue; }   /* degenerate colour response: not a usable pilot */
         float a = cal->valid ? 0.5f : 1.0f;
         for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = a * m[c][k] + (1 - a) * cal->m[c][k];
         if (!invert3(cal->m, cal->inv, &cal->cond)) { for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) cal->m[c][k] = m[c][k]; invert3(cal->m, cal->inv, &cal->cond); }
