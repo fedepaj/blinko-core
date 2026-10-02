@@ -115,9 +115,12 @@ synchronised (their syncs coincide). Every `pilot_ms` (default 30 ms, i.e.
 (P = `RS_PILOT_P` = 4, so 36 chips ≈ 3.6 % overhead):
 `[dark 2P][R P][dark P][G P][dark P][B P][dark 2P]`.
 
-The receiver looks for that block in the luma profile (`r+g+b`): three equal,
-equally spaced pulses (widths within 30 %, gaps within 35 % of each other and
-between 0.3 and 1.6 pulse widths) between two dark zones. From the middle half
+The receiver looks for that block in the luma profile (`r+g+b`), binarized at
+15 % of its range with runs shorter than 4 rows absorbed by their neighbours
+(a RAW Bayer profile toggles for a few rows at every threshold crossing): three
+equal, equally spaced pulses (widths within 30 %, gaps equal within 35 % or
+0.1 pulse width, and between 0.12 and 1.6 pulse widths: the exposure smear
+widens the pulses and narrows the gaps alike) between two dark zones. From the middle half
 of each pulse, minus the dark baseline of the first gap, it measures the
 camera's RGB response to each LED (a 3×3 matrix, columns normalised to sum 1),
 checks that it is well conditioned (`cond ≥ 0.35`), smooths it into the stored

@@ -58,18 +58,33 @@ int rs_rgb_pilot_detect(rs_rgb_cal_t *cal, const float *r, const float *g, const
         if (nr >= RS_RGB_MAX_RUNS) break;
         run_lvl[nr] = l; run_start[nr] = i; run_len[nr] = 1; nr++;
     }
+    /* Glitch removal: a RAW Bayer profile toggles for 1-3 rows at every threshold crossing
+     * (R, Gr/Gb and B rows alternate in sensitivity), which chops the H L H L H pattern into
+     * dozens of runs. Runs shorter than 4 rows are absorbed by their neighbours. */
+    for (int pass = 0; pass < 2; pass++) {
+        int w = 0;
+        for (int i = 0; i < nr; i++) {
+            if (run_len[i] < 4 && w > 0 && i + 1 < nr) {          /* glitch between two runs of the other level: join them */
+                run_len[w - 1] += run_len[i] + run_len[i + 1]; i++; continue;
+            }
+            if (w > 0 && run_lvl[w - 1] == run_lvl[i]) { run_len[w - 1] += run_len[i]; continue; }
+            run_lvl[w] = run_lvl[i]; run_start[w] = run_start[i]; run_len[w] = run_len[i]; w++;
+        }
+        nr = w;
+    }
     /* pattern: dark(>=1.5P) H L H L H dark(>=1.5P), the five inner runs equal within 35 % */
     for (int i = 1; i + 6 < nr; i++) {
         if (run_lvl[i] != 1) continue;
         float P = (float)run_len[i];
         if (P < 3) continue;
-        /* three pulses of equal width; the two gaps equal to each other and not
-         * shorter than 30 % of a pulse (a saturating LED lengthens ON runs and
-         * shortens OFF runs by the exposure smear, on all three alike) */
+        /* three pulses of equal width; the two gaps equal to each other and not shorter than
+         * 12 % of a pulse. The exposure smear and a bright LED lengthen the ON runs and shorten
+         * the OFF runs alike: on a 57 us-exposure phone at T = 105 us the 4-chip pulses read
+         * ~100 rows and the 4-chip gaps ~25 at this threshold (a 0.25 ratio), still a pilot. */
         int ok = 1;
         for (int k = 2; k < 5; k += 2) if (fabsf_((float)run_len[i + k] - P) > 0.3f * P) { ok = 0; break; }
-        float G = (float)run_len[i + 1];
-        if (ok && (fabsf_((float)run_len[i + 3] - G) > 0.35f * G || G < 0.3f * P || G > 1.6f * P)) ok = 0;
+        float G = (float)run_len[i + 1], gtol = 0.35f * G > 0.1f * P ? 0.35f * G : 0.1f * P;
+        if (ok && (fabsf_((float)run_len[i + 3] - G) > gtol || G < 0.12f * P || G > 1.6f * P)) ok = 0;
         if (!ok) continue;
         if (run_lvl[i - 1] != 0 || (float)run_len[i - 1] < 1.5f * G) continue;
         if (run_lvl[i + 5] != 0 || (float)run_len[i + 5] < 1.5f * G) continue;
