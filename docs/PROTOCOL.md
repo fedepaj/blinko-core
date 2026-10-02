@@ -110,10 +110,14 @@ two seconds while the last log lines still follow it.
 
 With an RGB LED the transmitter sends **three independent streams** (R, G, B),
 taking packets from the carousel in turn: three packets per packet interval,
-synchronised (their syncs coincide). Every `pilot_ms` (default 30 ms, i.e.
-1500 chips at T = 60 µs) a **pilot block** of 9·P chips is emitted at a packet boundary
-(P = `RS_PILOT_P` = 4, so 36 chips ≈ 3.6 % overhead):
-`[dark 2P][R P][dark P][G P][dark P][B P][dark 2P]`.
+synchronised (their syncs coincide). On average every `pilot_ms` (default
+30 ms, i.e. 1500 chips at T = 60 µs) a **pilot block** of 9·P chips is emitted at
+a packet boundary (P = `RS_PILOT_P` = 4, so 36 chips ≈ 3.6 % overhead):
+`[dark 2P][R P][dark P][G P][dark P][B P][dark 2P]`. The interval between
+blocks is not constant: it is the period scaled by 0.5–1.5 along a golden-ratio
+sequence, so the block's position within the camera frame changes from one
+block to the next and a phone whose frame period happens to be close to the
+pilot cadence still sees a whole block inside the LED blob every few frames.
 
 The receiver looks for that block in the luma profile (`r+g+b`), binarized at
 15 % of its range with runs shorter than 4 rows absorbed by their neighbours
@@ -125,7 +129,7 @@ of each pulse, minus the dark baseline of the first gap, it measures the
 camera's RGB response to each LED (a 3×3 matrix, columns normalised to sum 1),
 checks that it is well conditioned (`cond ≥ 0.35`), smooths it into the stored
 matrix (EMA, 0.5) and inverts it; the pulse width also gives an independent
-rows-per-chip estimate. Without a recent pilot (3 s, `RS_RX_CAL_TTL`) or with
+rows-per-chip estimate. Without a recent pilot (10 s, `RS_RX_CAL_TTL`) or with
 a degenerate matrix the receiver falls back to the other modes below, so a
 board with a single LED works with the same app. No backwards compatibility
 with luma-only receivers is planned.
@@ -176,7 +180,7 @@ For each camera frame (`rs_multi_process`):
 | mode | when | what is decoded |
 |---|---|---|
 | 0 luma | single-channel input, or no pilot lock and the light is not three-coloured | `(r+g+b)/3` |
-| 1 RGB | `cal.valid` and a pilot seen in the last 3 s | the three unmixed channels `inv · (r,g,b)` |
+| 1 RGB | `cal.valid` and a pilot seen in the last 10 s | the three unmixed channels `inv · (r,g,b)` |
 | 2 direct | all three camera channels modulated (`rs_rx_three_coloured`) but no pilot lock | the camera's own R, G and B as the three streams |
 
 Mode 2 exists because a 3-die RGB LED seen defocused is three colour discs
@@ -398,7 +402,7 @@ The reset cause (`RSTSR0/1/2`) is included in the STATUS at every boot.
 | rows per chip | ≥ 1.2 for the detector; ≥ 3 for comfort |
 | packet length | 82 chips = 3.3 ms at T = 60 µs |
 | repetition | 1 when the blob is taller than a packet, 2–3 when it is not |
-| channels | 3 (RGB), pilot every 30 ms (36 chips) |
+| channels | 3 (RGB), pilot every 30 ms on average (36 chips) |
 | visible blink | 150 ms on / 50 ms off |
 | FAULT weight | 3 in the death loops |
 | death loop timing | T = 120 µs, 3 copies, one stream on the fault LED, 150/50 ms bursts, full brightness: the setting every phone tried could read, independent of the running one |

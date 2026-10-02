@@ -17,7 +17,10 @@ extern "C" {
 
 #define RS_RX_MAX_PKTS  96
 #define RS_RX_QUEUE     16
-#define RS_RX_CAL_TTL   3.0f   /* seconds without a pilot before falling back to luma */
+#define RS_RX_CAL_TTL   10.0f  /* seconds without a pilot before falling back to luma/direct. The colour
+                                * matrix changes only when the light or the camera does; a 30 fps phone
+                                * whose blob covers a third of the readout sees a whole block in 15-20 %
+                                * of its frames, and 3 s left it dropping to direct mode on unlucky runs. */
 
 typedef struct {
     rs_packet_t pkt;

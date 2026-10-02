@@ -1,4 +1,8 @@
 #include "rs_rx.h"
+#ifdef RS_DEC_DEBUG
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 
 static float s_ch[3][RS_DEC_MAX_ROWS];
 static float s_luma[RS_DEC_MAX_ROWS];
@@ -173,6 +177,13 @@ int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, i
      * seen defocused is three colour discs offset by ~40 % of their diameter, so no pilot lock
      * may ever happen; in that case the camera channels are decoded directly. */
     int three = rs_rx_three_coloured(r, g, b, n);
+#ifdef RS_DEC_DEBUG
+    /* RS_RX_DUMP=<file>: append the profiles the pilot detector sees (frame time, n, then
+     * r g b per row) for offline inspection of the colour response. Debug builds only. */
+    { static FILE *dump; static int tried;
+      if (!tried) { tried = 1; const char *f = getenv("RS_RX_DUMP"); if (f) dump = fopen(f, "w"); }
+      if (dump) { fprintf(dump, "F %.4f %d\n", t, n); for (int i = 0; i < n; i++) fprintf(dump, "%.1f %.1f %.1f\n", r[i], g[i], b[i]); fflush(dump); } }
+#endif
     if (rs_rgb_pilot_detect(&rx->cal, r, g, b, n)) rx->last_pilot_t = t;
     int rgb = rx->cal.valid && (t - rx->last_pilot_t) < RS_RX_CAL_TTL;
 #ifdef RS_RX_DIRECT_ALWAYS
