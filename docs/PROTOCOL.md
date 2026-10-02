@@ -270,6 +270,47 @@ the Python tools) to trace candidates and hypotheses on stderr and read the
 timing counters (`rs_decode_debug_counters`); `RS_LIB=<cached dylib>` runs the
 Python tools against an older core build for A/B comparisons.
 
+### Stitching across frames (`rs_stitch.c`)
+
+When the lit blob is shorter than a packet (a far or small light, a 30 fps
+phone showing a few milliseconds of each frame), no frame holds a whole
+packet. With **repetition** on the board (`rep` 20–60, `cfg.repeat`),
+successive frames show successive pieces of the same 82-chip cycle, at phases
+that advance by the frame period modulo the packet period. Per channel, when
+a frame yielded no packet, the receiver:
+
+1. takes the piece: the lit blob's rows (the longest stretch above a quarter
+   of the raw profile's range, trimmed by a chip), normalized as the detector
+   sees them;
+2. anchors it when the frame shows a sync well inside the blob: the gap is
+   chip 0 of the cycle. Only syncs at the stream's clock count (the median of
+   the sync clocks seen; a sync cut by the blob's edge or a data run posing as
+   one measures another clock);
+3. learns the **chip period in seconds** from the anchored frames: their
+   phases must all equal `phase0 + t/period` modulo the cycle. A frame is a
+   thousand chips, so a wrong period scatters the phases; the period is found
+   by a search of ±12 % around the row-time guess (`rs_rx_set_row_time`,
+   which the apps take from the strobe calibration), outward from the guess
+   because periods one cycle-per-frame apart fit the anchors equally, and is
+   refined within ±2 % afterwards. Three agreeing anchors lock it;
+4. predicts the phase of frames without a sync from the last anchor and the
+   period, refined by correlating the piece against the cycle (±4 chips);
+   a sync that disagrees with a lock by more than 3 chips is ignored (three
+   in a row drop the lock);
+5. keeps the last 12 pieces and composes the cycle from the newest ones that
+   agree where they overlap (packets of one slot share their first ~30 chips,
+   so an older piece from the previous packet can agree on the prefix and
+   still poison the rest; pieces from another packet are left out, and after
+   a failed decode nothing is discarded: the next frames push them out);
+6. when every chip of the cycle is covered, lays the cycle out twice as a
+   profile at 4 rows per chip and hands it to the ordinary detector; a decoded
+   packet goes to the assembler like any other (`rs_rx_stitched` counts them).
+
+Simulated (1080 rows, 6 rows per chip, 30 fps, blob 45 chips = half a packet):
+each packet sent 80 times (0.2 s) gives 44 packets in 13 s where the plain
+detector gives none; 400 times (1 s) recovers 12 of 13. A 4 % error in the
+row time does not matter.
+
 ### Grid decode
 
 The transmitter sends packets back to back, so from one decoded packet the

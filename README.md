@@ -11,6 +11,7 @@ Arduino library, the Zephyr module, the iOS app and the Android app.
 - `rs_decoder.[ch]` profile → packets · `rs_assembler.[ch]` packets → messages
 - `rs_rgb.[ch]` pilot detection and unmixing · `rs_rx.[ch]` complete receiver
 - `rs_multi.[ch]` segmentation and one receiver per light (several boards at once)
+- `rs_stitch.[ch]` a packet read in pieces over several frames (repeated packets, blob shorter than a packet)
 - `rs_frame.[ch]` luma/RGBA/YUV frame → per-row profiles
 
 ## Requirements

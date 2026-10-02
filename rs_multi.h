@@ -44,6 +44,7 @@ typedef struct {
     unsigned char keep[RS_MAX_TRACKS][RS_RX_MAX_PKTS];    /* per-frame cross-talk mask */
     float exposure_rows;       /* camera exposure in rows, pushed into every track's decoder (0 = unknown) */
     rs_parallel_fn parallel; void *parallel_user;   /* see rs_multi_set_parallel */
+    float row_seconds;                               /* see rs_multi_set_row_time */
     int next_id;
     int nblobs;                /* blobs found in the last frame */
     rs_blob_t blobs[RS_MAX_BLOBS];
@@ -55,6 +56,8 @@ void rs_multi_set_exposure_rows(rs_multi_t *m, float rows);
 /* Platform hook for decoding a light's three channels on several threads (see rs_rx.h); applies
  * to every track, present and future. */
 void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user);
+/* Sensor row time in seconds for every track's receiver (stitching); 0 = unknown. */
+void rs_multi_set_row_time(rs_multi_t *m, float seconds);
 
 /* Process one interleaved RGB(A) frame. Returns the total packets decoded. */
 int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_stride, int pixel_stride,

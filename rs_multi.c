@@ -302,6 +302,12 @@ void rs_multi_set_exposure_rows(rs_multi_t *m, float rows)
     for (int i = 0; i < RS_MAX_TRACKS; i++) m->tracks[i].rx.cfg.exposure_rows = rows;
 }
 
+void rs_multi_set_row_time(rs_multi_t *m, float seconds)
+{
+    m->row_seconds = seconds;
+    for (int i = 0; i < RS_MAX_TRACKS; i++) rs_rx_set_row_time(&m->tracks[i].rx, seconds);
+}
+
 void rs_multi_set_parallel(rs_multi_t *m, rs_parallel_fn fn, void *user)
 {
     m->parallel = fn; m->parallel_user = user;
@@ -349,6 +355,7 @@ int rs_multi_process(rs_multi_t *m, const uint8_t *px, int w, int h, int row_str
         rs_rx_init(&tr->rx);
         tr->rx.cfg.exposure_rows = m->exposure_rows;
         rs_rx_set_parallel(&tr->rx, m->parallel, m->parallel_user);
+        rs_rx_set_row_time(&tr->rx, m->row_seconds);
         tr->rx.defer_assembly = 1;
         track_feed(m, tr, px, w, h, row_stride, pixel_stride, r_off, g_off, b_off, &m->blobs[i], t);
         assigned[i] = 1;

@@ -7,6 +7,7 @@
 #define RS_RX_H
 
 #include "rs_decoder.h"
+#include "rs_stitch.h"
 #include "rs_assembler.h"
 #include "rs_rgb.h"
 
@@ -38,6 +39,10 @@ typedef struct {
     rs_dec_stats_t last_stats;   /* of the last decoded channel */
     rs_parallel_fn parallel;     /* optional: decodes the channels of a frame in parallel (rs_parallel_fn in rs_decoder.h); also handed to the decoder via cfg */
     void          *parallel_user;
+    float         row_seconds;      /* sensor row time (s), 0 = unknown; enables phase prediction in the stitcher */
+    int           stitch_enabled;   /* default 1: pieces of repeated packets are stitched across frames */
+    rs_stitch_t   stitch[3];        /* one per channel */
+    uint32_t      stitched_total;   /* packets obtained by stitching */
     int           npkts;
     rs_rx_packet_t pkts[RS_RX_MAX_PKTS];
     rs_message_t  queue[RS_RX_QUEUE];
@@ -55,6 +60,10 @@ int rs_rx_three_coloured(const float *r, const float *g, const float *b, int n);
  * keep is NULL) to the assembler. Lets a multi-source receiver drop cross-talk first. */
 /* Install the platform's parallel hook (see rs_parallel_fn); NULL decodes the channels in turn. */
 void rs_rx_set_parallel(rs_rx_t *rx, rs_parallel_fn fn, void *user);
+/* The sensor's row time in seconds (exposure_us / rows is the app's; here time per row), so the
+ * stitcher can predict a piece's phase between frames that show a sync. 0 = unknown. */
+void rs_rx_set_row_time(rs_rx_t *rx, float seconds);
+uint32_t rs_rx_stitched(const rs_rx_t *rx);   /* packets obtained by stitching pieces across frames */
 void rs_rx_assemble(rs_rx_t *rx, const uint8_t *keep);
 int rs_rx_process(rs_rx_t *rx, const float *r, const float *g, const float *b, int n, float t);
 

@@ -687,16 +687,12 @@ static void cand_job(void *ctx, int i)
     if (fwd != 0) { s_cnt[3]++; if (decode_candidate(j->n, j->cfg, j->t0, j->rpc, j->amp, 1, &j->pk[j->npk], &j->st) == 1) j->npk++; }
 }
 
-int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
-                      rs_packet_t *out, int max_out, rs_dec_stats_t *st)
+static RS_TLS rs_cjob_t s_jobs[24];
+/* steps 1-3: candidates at every scale, ranking, validation; returns the validated jobs */
+static int collect_validate(const float *p, int n, const rs_dec_cfg_t *cfg, rs_dec_stats_t *st, rs_cjob_t *jobs, int budget)
 {
-    rs_dec_stats_t local; if (!st) st = &local;
-    st->syncs = st->crc_ok = st->crc_fail = st->truncated = 0;
-    st->rows_per_chip = 0; st->contrast = 0;
-    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
-    if (n < 16 || max_out <= 0) return 0;
 
-    RS_TIMER(tt0);
+    RS_TIMER(tc0);
     float gmin = p[0], gmax = p[0];
     for (int r = 0; r < n; r++) { if (p[r] < gmin) gmin = p[r]; if (p[r] > gmax) gmax = p[r]; }
     st->contrast = gmax - gmin;
@@ -717,13 +713,12 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
         collect_scale(p, n, cfg, scales[s], local_c, &lc);
         for (int i = 0; i < lc && nc < 6 * RS_MAX_CAND; i++) { cands[nc] = local_c[i]; cand_scale[nc] = scales[s]; nc++; }
     }
-    RS_TIMED(8, tt0);
+    RS_TIMED(8, tc0);
     /* 2. best correlations first, across scales, within the detector budget */
     for (int i = 1; i < nc; i++) { cand_t k = cands[i]; float ks = cand_scale[i]; int j = i - 1; while (j >= 0 && cands[j].c < k.c) { cands[j + 1] = cands[j]; cand_scale[j + 1] = cand_scale[j]; j--; } cands[j + 1] = k; cand_scale[j + 1] = ks; }
     /* 3. validation (cheap, sequential): the candidates that survive, best first, up to the
      *    budget. The checks cost no detector run; they also fix the clock from the ON run. */
-    int budget = hint > 0 ? 6 : 24;
-    static RS_TLS rs_cjob_t jobs[24]; int nj = 0;       /* per calling thread: a channel's detector may itself run on a channel thread */
+    int nj = 0;
     for (int i = 0; i < nc && nj < budget; i++) {
         float rpc = cands[i].rpc, x = cands[i].x;
         if (s_prep_p != p || s_prep_n != n || fabsf_(s_prep_rpc - cand_scale[i]) > 1e-3f) prepare(p, n, cand_scale[i], cfg->min_contrast);
@@ -764,11 +759,56 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
                 if (mx < s_emin[b] + 0.5f * amp) continue;
             }
         }
+        {
+            /* the data after the sync must be made of runs of 3..8 chips at this clock (binarized
+             * at this scale; a run cut by the end of the usable rows does not count): a sync seen
+             * at half or two-thirds of the true clock, or a data run posing as one, fails here */
+            int r = iroundf_(t0 + (float)(RS_SYNC_ON_CHIPS + RS_SYNC_OFF_CHIPS) * rpc), bad = 0, runs = 0;
+            float lo = (float)RS_RLL_MIN_RUN * rpc * 0.6f, hi = (float)RS_RLL_MAX_RUN * rpc * 1.2f + er;
+            int glitch = iroundf_(0.3f * rpc); if (glitch < 2) glitch = 2;
+            if (r < 0) r = 0;
+            /* the first data run may continue the sync's OFF level (codewords start with zeros):
+             * skip whatever run contains the first data row */
+            { int lvl0 = r < n ? s_bin[r] : 2; while (r < n && s_bin[r] == lvl0) r++; }
+            float lowamp = 0.6f * amp > cfg->min_contrast ? 0.6f * amp : cfg->min_contrast;
+            while (r < n && runs < 10 && !bad) {
+                if (s_bin[r] == 2 || s_amp[r] < lowamp) break;          /* the blob's fade: not judged */
+                int r2 = r, lvl = s_bin[r];
+                /* the run, with glitches shorter than 0.3 chip (noise at the threshold) absorbed */
+                for (;;) {
+                    while (r2 < n && s_bin[r2] == lvl) r2++;
+                    int r3 = r2; while (r3 < n && s_bin[r3] != 2 && s_bin[r3] != lvl) r3++;
+                    if (r3 < n && s_bin[r3] == lvl && r3 - r2 < glitch) { r2 = r3; continue; }
+                    break;
+                }
+                if (r2 >= n || s_bin[r2] == 2 || s_amp[r2] < lowamp) break;   /* cut by the end: not judged */
+                float L = (float)(r2 - r);
+                if (L < lo || L > hi) bad = 1;
+                r = r2; runs++;
+            }
+            RS_DBG("cand scale %.1f x %.1f rpc %.3f: data runs %s after %d\n", cand_scale[i], x, rpc, bad ? "BAD" : "ok", runs);
+            if (bad) continue;
+        }
         RS_DBG("cand scale %.1f x %.1f rpc %.3f (from %.1f/%.3f) corr %.2f amp %.1f\n", cand_scale[i], x, rpc, cands[i].x, cands[i].rpc, cands[i].c, amp);
         rs_cjob_t *j = &jobs[nj++];
         j->p = p; j->n = n; j->cfg = cfg; j->scale = cand_scale[i]; j->x = x; j->t0 = t0; j->rpc = rpc; j->amp = amp; j->npk = 0;
         j->st.syncs = j->st.crc_ok = j->st.crc_fail = j->st.truncated = 0;
     }
+    return nj;
+}
+
+int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
+                      rs_packet_t *out, int max_out, rs_dec_stats_t *st)
+{
+    rs_dec_stats_t local; if (!st) st = &local;
+    st->syncs = st->crc_ok = st->crc_fail = st->truncated = 0;
+    st->rows_per_chip = 0; st->contrast = 0;
+    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
+    if (n < 16 || max_out <= 0) return 0;
+    RS_TIMER(tt0);
+    rs_cjob_t *jobs = s_jobs;                         /* per calling thread: a channel's detector may itself run on a channel thread */
+    int nj = collect_validate(p, n, cfg, st, jobs, cfg->rows_per_chip_hint > 0 ? 6 : 24);
+    if (nj < 0) return 0;
     /* 4. detection (map): every validated candidate is independent — forward decode, then the
      *    packet before the sync — so they run through the platform's parallel hook when there is
      *    one (each job normalizes the profile for its own scale in its thread's scratch), else
@@ -800,6 +840,21 @@ int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
 }
 
 const uint8_t *rs_decode_debug_binary(int *n) { if (n) *n = s_dbg_n; return s_dbg; }
+
+int rs_decode_syncs(const float *p, int n, const rs_dec_cfg_t *cfg, rs_sync_t *out, int max_out)
+{
+    rs_dec_stats_t st; st.syncs = st.crc_ok = st.crc_fail = st.truncated = 0; st.rows_per_chip = 0; st.contrast = 0;
+    if (n > RS_DEC_MAX_ROWS) n = RS_DEC_MAX_ROWS;
+    if (n < 16 || max_out <= 0) return 0;
+    int nj = collect_validate(p, n, cfg, &st, s_jobs, 24), k = 0;
+    for (int i = 0; i < nj && k < max_out; i++) { out[k].x = s_jobs[i].x; out[k].rpc = s_jobs[i].rpc; out[k].amp = s_jobs[i].amp; k++; }
+    return k;
+}
+
+void rs_decode_normalized(const float **norm, const float **amp, int *n)
+{
+    if (norm) *norm = s_norm; if (amp) *amp = s_amp; if (n) *n = s_prep_n;
+}
 
 /* Decode one packet at a known position (grid prediction): row_start is the first gap chip,
  * rpc the chip length in rows. No sync search: the ML detection and the CRC only. */

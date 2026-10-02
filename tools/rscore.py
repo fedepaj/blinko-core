@@ -4,7 +4,7 @@ import ctypes, os, subprocess, sys, hashlib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the blinko-core repo
 CORE = ROOT
 BUILD = os.path.join(ROOT, "build")
-SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c", "rs_multi.c"]
+SRCS = ["rs_tx.c", "rs_decoder.c", "rs_assembler.c", "rs_pack.c", "rs_rgb.c", "rs_rx.c", "rs_frame.c", "rs_multi.c", "rs_stitch.c"]
 
 RS_PKT_CHIPS = 82
 RS_NUM_SLOTS = 8
@@ -100,6 +100,9 @@ _lib.rs_rx_sizeof.restype = ctypes.c_size_t
 _lib.rs_rx_init.argtypes = [ctypes.c_void_p]
 _lib.rs_rx_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
 _lib.rs_rx_process.restype = ctypes.c_int
+_lib.rs_rx_set_row_time.argtypes = [ctypes.c_void_p, ctypes.c_float]
+_lib.rs_rx_set_parallel.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_lib.rs_rx_stitched.argtypes = [ctypes.c_void_p]; _lib.rs_rx_stitched.restype = ctypes.c_uint32
 _lib.rs_rx_pop_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(Message)]
 _lib.rs_rx_pop_message.restype = ctypes.c_int
 for name, rt in (("rs_rx_mode", ctypes.c_int), ("rs_rx_rows_per_chip", ctypes.c_float), ("rs_rx_pilots", ctypes.c_int), ("rs_rx_cal_cond", ctypes.c_float), ("rs_rx_packets", ctypes.c_uint32), ("rs_rx_messages", ctypes.c_uint32)):
@@ -260,6 +263,11 @@ class Receiver:
     def __init__(self):
         self.buf = ctypes.create_string_buffer(_lib.rs_rx_sizeof())
         _lib.rs_rx_init(self.buf)
+
+    def set_row_time(self, seconds): _lib.rs_rx_set_row_time(self.buf, ctypes.c_float(seconds))
+    def set_parallel_off(self): _lib.rs_rx_set_parallel(self.buf, None, None)
+    @property
+    def stitched(self): return _lib.rs_rx_stitched(self.buf)
 
     def process(self, r, g=None, b=None, t=0.0):
         import numpy as np

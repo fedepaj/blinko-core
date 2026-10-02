@@ -60,6 +60,16 @@ typedef struct {
 
 void rs_dec_cfg_default(rs_dec_cfg_t *cfg);
 
+/* A validated sync candidate (see rs_decode_syncs): gap start row x, clock in rows per chip. */
+typedef struct { float x, rpc, amp; } rs_sync_t;
+/* The validated sync candidates of a profile (the detector's steps 1-3 without the detection):
+ * where packets start and at what clock, even when no whole packet fits the frame. Returns the
+ * count written to out (<= max_out). Leaves the profile normalized for the last candidate's scale. */
+int rs_decode_syncs(const float *p, int n, const rs_dec_cfg_t *cfg, rs_sync_t *out, int max_out);
+/* The envelope-normalized profile (0..1) and local amplitude of the last prepared profile on this
+ * thread, as the detector sees them (valid right after rs_decode_profile / rs_decode_syncs). */
+void rs_decode_normalized(const float **norm, const float **amp, int *n);
+
 /* Decode packets from a profile. Returns number of packets written to out
  * (deduplicated, sorted by row). n is clamped to RS_DEC_MAX_ROWS. */
 int rs_decode_profile(const float *p, int n, const rs_dec_cfg_t *cfg,
